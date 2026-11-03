@@ -5,3 +5,9 @@ allowBuilds:
   esbuild: true
   '@biomejs/biome': true
   '@scarf/scarf': false
+
+overrides:
+  'image-size': '2.0.4'
+
+patchedDependencies:
+  metro@0.83.3: patches/metro@0.83.3.patch
