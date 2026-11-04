@@ -1,0 +1,1 @@
+Temporary probe to verify which writes the GitHub App integration permits. Deleted immediately after the check.
