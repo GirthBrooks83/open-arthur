@@ -1,13 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { MessageSchema } from "@ag-ui/core";
-import { CopilotKitIntelligence } from "@copilotkit/runtime/v2";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import { emailDraftSchema, proposalSchema } from "../../../packages/domain/src/index.ts";
 import { ActionService } from "./actions.ts";
-import { agentConfigured, makeRuntime } from "./agent.ts";
+import { agentConfigured } from "./agent-config.ts";
 import { createAuth } from "./auth.ts";
 import { BrowserService } from "./browser.ts";
 import { ComputerService, type DockerRunner } from "./computer.ts";
@@ -40,10 +39,26 @@ export async function createApp(
   const browser = new BrowserService(db, config, auth, files);
   const computer = new ComputerService(db, config, options.docker);
   const agent = new AgentService(db, config, workspace, files, actions, browser, computer);
-  const intelligence = config.intelligenceApiKey
-    ? new CopilotKitIntelligence({ apiKey: config.intelligenceApiKey })
-    : undefined;
-  const runtime = makeRuntime(config, agent, auth, intelligence);
+  // The CopilotKit runtime costs ~100 MB RSS to import and is only needed
+  // when a chat or Rich Threads request actually arrives. Load it lazily so
+  // small instances (e.g. a 512 MB free tier) can boot and serve everything
+  // else without paying that cost at startup.
+  type MakeRuntime = typeof import("./agent.ts").makeRuntime;
+  type Runtime = ReturnType<MakeRuntime>;
+  type Intelligence = import("@copilotkit/runtime/v2").CopilotKitIntelligence;
+  let intelligencePromise: Promise<Intelligence | undefined> | undefined;
+  const getIntelligence = () =>
+    (intelligencePromise ??= (async () => {
+      if (!config.intelligenceApiKey) return undefined;
+      const { CopilotKitIntelligence } = await import("@copilotkit/runtime/v2");
+      return new CopilotKitIntelligence({ apiKey: config.intelligenceApiKey });
+    })());
+  let runtimePromise: Promise<Runtime> | undefined;
+  const getRuntime = () =>
+    (runtimePromise ??= (async () => {
+      const { makeRuntime } = await import("./agent.ts");
+      return makeRuntime(config, agent, auth, await getIntelligence());
+    })());
   const app = new Hono<{ Variables: { owner: string } }>();
   const origins = new Set([...config.allowedOrigins, new URL(config.publicUrl).origin]);
   app.use("*", async (c, next) => {
@@ -203,6 +218,7 @@ export async function createApp(
     });
     const main = await db.get<{ threadId: string }>(owner, "conversation-settings", "main");
     if (!main) throw new AppError("Main conversation could not be loaded", 503);
+    const intelligence = await getIntelligence();
     if (intelligence) {
       try {
         await intelligence.getOrCreateThread({
@@ -326,6 +342,7 @@ export async function createApp(
         "Configure a model and provider API key, or a valid AG-UI endpoint, to start chat",
         503,
       );
+    const runtime = await getRuntime();
     const response = await runtime.fetch(c.req.raw);
     // Runtime 1.70 emits SSE strings; a WHATWG Response body requires byte chunks.
     const encoder = new TextEncoder();

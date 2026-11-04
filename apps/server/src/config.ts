@@ -44,7 +44,10 @@ export function readConfig(): Config {
   const config: Config = {
     mode,
     port,
-    host: process.env.HOST ?? "127.0.0.1",
+    // Hosted platforms (Render, Fly, …) assign PORT and require binding all
+    // interfaces; a loopback-only bind is invisible to their port scan and
+    // the deploy never goes live. Locally (no PORT set) stay on loopback.
+    host: process.env.HOST ?? (process.env.PORT ? "0.0.0.0" : "127.0.0.1"),
     publicUrl,
     dataDir: resolve(process.env.DATA_DIR ?? ".openmuse"),
     databaseUrl: process.env.DATABASE_URL,
