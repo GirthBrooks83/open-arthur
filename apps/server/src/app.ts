@@ -112,6 +112,7 @@ export async function createApp(
       browserConfigured: Boolean(config.workerUrl && config.workerToken),
       integrations: {
         omniroute: Boolean(config.integrations?.omnirouteUrl),
+        mem0: Boolean(config.integrations?.mem0Url),
         graphiti: Boolean(config.integrations?.graphitiUrl),
         n8n: Boolean(config.integrations?.n8nUrl),
         anythingllm: Boolean(config.integrations?.anythingLlmUrl),

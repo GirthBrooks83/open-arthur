@@ -33,7 +33,8 @@ Endpoints are read in `apps/server/src/config.ts` (`integrations`).
 | Lane | Env var | Lab status (2026-11-04) |
 | --- | --- | --- |
 | OmniRoute | `OMNIROUTE_URL` | **Wired in the lab** — free model router; Groq lane answered in 0.48 s, Gemini lane in 2.6 s, both with real routed requests. Binds without an API key by default — set one before any long-running use. |
-| Graphiti | `GRAPHITI_URL` | **Wired in the lab harness** — temporal knowledge-graph memory, the approved memory lane. Fresh-process recall re-verified 2026-11-04 against a persisted embedded FalkorDB store (10/15 on the lab recall set). The memory head-to-head is still running (a challenger, Mem0, scored 15/15 in round 3); switching the approved memory lane is the owner's decision, not an automatic swap. |
+| Mem0 | `MEM0_URL` | **The MAIN memory lane — chosen by the owner 2026-11-04** ("Mem0 it is"). Won the memory head-to-head: 15/15 in round 3, re-verified live 2026-11-04 (fresh container, persisted store). Its write path preserves budgets, dates, and preferences verbatim — exactly the fact classes the graph lane dropped. Known weakness, on record: corrections are additive, so a superseded fact can still rank first in recall — which is why the Graphiti side lane runs alongside it. |
+| Graphiti | `GRAPHITI_URL` | **The SIDE memory lane — runs alongside Mem0** (owner's expanded decision, 2026-11-04, minutes after picking Mem0: run both). Temporal knowledge-graph memory; fresh-process recall re-verified 2026-11-04 against a persisted embedded FalkorDB store (10/15 on the lab recall set; 8/15 in round 2 with the other extractor). Its job in the pair: the long-term/temporal graph and clean supersession — when a fact changes, the old value stops surfacing, covering Mem0's stale-first weakness. Both lanes stay usable. |
 | n8n | `N8N_URL` | **Wired in the local lab stack** — v2.46.6, hardened localhost-only boot, smoke workflow executed successfully. Fair-code (Sustainable Use License): internal use only, never offer it as a hosted service. Owner account creation is a first-UI-launch step that has deliberately not been done. |
 | AnythingLLM | `ANYTHINGLLM_URL` | **Wired in the lab (server)** — installed, database migrated, production boot verified (HTTP 200; API answers 403 without auth, as expected). Collector and frontend installs remain. Lab scope only. |
 
@@ -62,10 +63,12 @@ exists.
 Everything below is evaluated or catalogued in the lab and is **not** part
 of this change. Each needs the owner's explicit approval before any wiring.
 
-- **Memory challengers** (head-to-head still open): Mem0 (round 3: 15/15 —
-  see the Graphiti note above; the switch decision is the owner's),
-  Cognee, Hindsight, AgentDB, claude-mem (write path proven, semantic
-  recall not yet).
+- **Memory challengers** (not chosen): Cognee (also scored 15/15 in the
+  head-to-head, but heavy — ~925 MB and multi-second answers on the free
+  tier), Hindsight, AgentDB, claude-mem (write path proven, semantic
+  recall not yet). The winner, Mem0, is wired as the main memory lane
+  above per the owner's 2026-11-04 decision, with Graphiti kept on as
+  the side lane by his expanded decision the same evening.
 - **Orchestration:** LangGraph-JS (spike harness runs end-to-end),
   VoltAgent (held on install) — a pick-one spike decides; only the winner
   would be wired.
@@ -76,8 +79,9 @@ of this change. Each needs the owner's explicit approval before any wiring.
   install), Skyvern (AGPL-3.0, trial only, held on install).
 - **Gateways:** LiteLLM (held on install; would duplicate OmniRoute —
   evaluate before ever wiring both).
-- **Other:** Langfuse (deferred by rule: no observability server before
-  the memory winner is named), Strands TS SDK (held on harness),
+- **Other:** Langfuse (was deferred by rule until the memory winner was
+  named; the winner is now Mem0, but Langfuse itself still needs the
+  owner's approval before any wiring), Strands TS SDK (held on harness),
   Letta Code (held on install), Agent Zero (held on security review —
   past-year CVE flags), Awesome LLM Apps (reference shelf; templates, not
   a component), changedetection.io, promptfoo, txtai (catalogued, not yet
