@@ -109,6 +109,26 @@ export async function createApp(
       ok: true,
       mode: config.mode,
       agentConfigured: agentConfigured(config),
+      atlasLane: (() => {
+        const atlas = config.atlasLane ?? {
+          enabled: true,
+          configured: Boolean(process.env.GROQ_API_KEY),
+          provider: "GPT-OSS 120B via Groq free tier (OpenAI-compatible) — not a paid OpenAI key",
+          model: "openai/gpt-oss-120b",
+          baseUrl: "https://api.groq.com/openai/v1",
+          billing:
+            "free_then_paid — auto cut-off if the free route stops being free; never charges",
+        };
+        return {
+          enabled: atlas.enabled,
+          configured: atlas.configured,
+          status: !atlas.enabled ? "off" : atlas.configured ? "ready" : "awaiting-groq-key",
+          provider: atlas.provider,
+          model: atlas.model,
+          baseUrl: atlas.baseUrl,
+          billing: atlas.billing,
+        };
+      })(),
       browserConfigured: Boolean(config.workerUrl && config.workerToken),
       integrations: {
         omniroute: Boolean(config.integrations?.omnirouteUrl),

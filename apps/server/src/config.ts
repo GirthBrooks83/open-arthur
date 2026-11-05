@@ -19,6 +19,22 @@ export interface Config {
   agentUrl?: string;
   agentToken?: string;
   intelligenceApiKey?: string;
+  // ATLAS lane (owner's orders, 2026-11-04: "Turn ATLAS on" + the
+  // free-route clarification — "the free part of Atlas"). The lane is
+  // powered by the FREE route already live in this stack: GPT-OSS 120B
+  // served by the Groq free tier through Groq's OpenAI-compatible
+  // endpoint. It is NOT a paid OpenAI API connection and no OpenAI key
+  // exists or will be funded for it. Billing classification:
+  // free_then_paid with auto cut-off — if the Groq free tier ever stops
+  // being free, this lane must be cut off, never charged.
+  atlasLane?: {
+    enabled: boolean;
+    configured: boolean;
+    provider: string;
+    model: string;
+    baseUrl: string;
+    billing: string;
+  };
   googleClientId?: string;
   googleClientSecret?: string;
   googleRedirectUri: string;
@@ -77,6 +93,16 @@ export function readConfig(): Config {
     agentUrl: process.env.AGENT_URL,
     agentToken: process.env.AGENT_TOKEN,
     intelligenceApiKey: process.env.CPK_INTELLIGENCE_API_KEY,
+    atlasLane: {
+      enabled: process.env.ATLAS_LANE_ENABLED !== "false",
+      // The free route's credential is the Groq key (GROQ_API_KEY);
+      // OPENAI_API_KEY deliberately plays no part in this lane.
+      configured: Boolean(process.env.GROQ_API_KEY),
+      provider: "GPT-OSS 120B via Groq free tier (OpenAI-compatible) — not a paid OpenAI key",
+      model: "openai/gpt-oss-120b",
+      baseUrl: "https://api.groq.com/openai/v1",
+      billing: "free_then_paid — auto cut-off if the free route stops being free; never charges",
+    },
     googleClientId: process.env.GOOGLE_CLIENT_ID,
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
     googleRedirectUri: `${publicUrl}/api/google/callback`,
