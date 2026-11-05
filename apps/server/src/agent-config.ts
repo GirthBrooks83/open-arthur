@@ -13,6 +13,8 @@ const PROVIDER_KEY_ENV: Record<string, string> = {
   openai: "OPENAI_API_KEY",
   anthropic: "ANTHROPIC_API_KEY",
   google: "GOOGLE_API_KEY",
+  groq: "GROQ_API_KEY",
+  venice: "VENICE_API_KEY",
 };
 
 export function modelProviderKeyPresent(model?: string): boolean {
@@ -22,7 +24,11 @@ export function modelProviderKeyPresent(model?: string): boolean {
   if (keyEnv) return Boolean(process.env[keyEnv]);
   // Unknown provider prefix: keep the previous any-known-key behaviour.
   return Boolean(
-    process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.GOOGLE_API_KEY,
+    process.env.OPENAI_API_KEY ||
+      process.env.ANTHROPIC_API_KEY ||
+      process.env.GOOGLE_API_KEY ||
+      process.env.GROQ_API_KEY ||
+      process.env.VENICE_API_KEY,
   );
 }
 

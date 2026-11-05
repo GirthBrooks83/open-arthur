@@ -28,7 +28,19 @@ export interface Config {
   computerEnabled?: boolean;
   computerImage?: string;
   computerDeploymentId?: string;
+  integrations?: IntegrationEndpoints;
   allowedOrigins: string[];
+}
+
+// Approved external lanes (see docs/integrations.md). Each is an optional
+// self-hosted service the operator runs separately; the URL being set is
+// what enables the lane. Unset means the lane is off — nothing in the
+// server talks to these endpoints unless they are configured here.
+export interface IntegrationEndpoints {
+  omnirouteUrl?: string;
+  graphitiUrl?: string;
+  n8nUrl?: string;
+  anythingLlmUrl?: string;
 }
 export function readConfig(): Config {
   const mode = process.env.WORKSPACE_MODE ?? "sample";
@@ -67,6 +79,12 @@ export function readConfig(): Config {
     computerEnabled: process.env.COMPUTER_ENABLED === "true",
     computerImage: process.env.COMPUTER_IMAGE ?? "openmuse-computer:local",
     computerDeploymentId: process.env.COMPUTER_DEPLOYMENT_ID,
+    integrations: {
+      omnirouteUrl: process.env.OMNIROUTE_URL,
+      graphitiUrl: process.env.GRAPHITI_URL,
+      n8nUrl: process.env.N8N_URL,
+      anythingLlmUrl: process.env.ANYTHINGLLM_URL,
+    },
     allowedOrigins: (
       process.env.ALLOWED_ORIGINS ?? "http://localhost:8081,http://127.0.0.1:8081"
     ).split(","),
