@@ -38,12 +38,14 @@ export interface Config {
 // server talks to these endpoints unless they are configured here.
 export interface IntegrationEndpoints {
   omnirouteUrl?: string;
-  // Dual memory lanes (owner's decisions, 2026-11-04): Mem0 is the MAIN
+  // Three memory lanes (owner's decisions, 2026-11-04): Mem0 is the MAIN
   // memory lane; Graphiti runs ALONGSIDE as the side lane — the temporal
-  // graph that retires superseded facts. Both stay usable; see
-  // docs/integrations.md.
+  // graph that retires superseded facts; Hindsight is the THIRD lane,
+  // ordered the same evening to run beside the other two. All stay
+  // usable; see docs/integrations.md.
   mem0Url?: string;
   graphitiUrl?: string;
+  hindsightUrl?: string;
   n8nUrl?: string;
   anythingLlmUrl?: string;
 }
@@ -88,6 +90,7 @@ export function readConfig(): Config {
       omnirouteUrl: process.env.OMNIROUTE_URL,
       mem0Url: process.env.MEM0_URL,
       graphitiUrl: process.env.GRAPHITI_URL,
+      hindsightUrl: process.env.HINDSIGHT_URL,
       n8nUrl: process.env.N8N_URL,
       anythingLlmUrl: process.env.ANYTHINGLLM_URL,
     },
