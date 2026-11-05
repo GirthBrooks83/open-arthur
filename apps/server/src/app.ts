@@ -114,6 +114,7 @@ export async function createApp(
         omniroute: Boolean(config.integrations?.omnirouteUrl),
         mem0: Boolean(config.integrations?.mem0Url),
         graphiti: Boolean(config.integrations?.graphitiUrl),
+        hindsight: Boolean(config.integrations?.hindsightUrl),
         n8n: Boolean(config.integrations?.n8nUrl),
         anythingllm: Boolean(config.integrations?.anythingLlmUrl),
       },
