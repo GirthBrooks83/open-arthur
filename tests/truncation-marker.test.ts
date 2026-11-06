@@ -102,7 +102,7 @@ test("a capped run with no confirmed outcome marks the stored update text", asyn
   const cutText = "1. Match the light.\n4. Water the bed";
   // Two ticks: the first unconfirmed end now auto-continues once
   // (bounded auto-continue, engine/service.ts); the continuation run
-  // ends unconfirmed too, so the task parks in waiting_input, where
+  // ends unconfirmed too, so the task is failed honestly, where
   // the stored update text is checked.
   const detail = await runFixtureTask(
     t,
@@ -110,7 +110,7 @@ test("a capped run with no confirmed outcome marks the stored update text", asyn
     "List 10 practical tips for keeping a houseplant alive indoors",
     2,
   );
-  assert.equal(detail.task.status, "waiting_input", detail.task.error ?? undefined);
+  assert.equal(detail.task.status, "failed", detail.task.error ?? undefined);
   assert.equal(detail.task.state.lastUpdate, `${cutText}\n\n${TRUNCATION_MARKER}`);
   assert.equal(detail.task.state.truncated, true);
   assert.ok(
