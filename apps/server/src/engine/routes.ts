@@ -89,7 +89,7 @@ export function agentRoutes(service: AgentService): Hono<{ Variables: { owner: s
       source: body.source ?? "You",
       createdAt: new Date().toISOString(),
     };
-    return c.json(await service.db.put(c.get("owner"), "memories", memory), 201);
+    return c.json(await service.remember(c.get("owner"), memory), 201);
   });
   app.post("/memories/:id", async (c) => {
     const body = memorySchema.parse(await c.req.json());

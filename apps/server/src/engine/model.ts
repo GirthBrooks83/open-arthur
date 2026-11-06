@@ -285,7 +285,10 @@ export async function executeModelTask(
     "agent-settings",
     "identity",
   );
-  const memories = await service.db.list<{ text: string; source: string }>(owner, "memories");
+  // Recall: internal memories merged with Mem0-lane facts for this
+  // task's prompt (the lane is the main memory lane; the internal store
+  // stays canonical and is the fallback when the lane is down).
+  const memories = await service.recallMemories(owner, task.prompt);
   const makeAgent = (model: string) =>
     new BuiltInAgent({
       model,

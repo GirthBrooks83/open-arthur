@@ -210,7 +210,7 @@ export class ConversationAgent extends AbstractAgent {
             source: "User confirmed in chat",
             createdAt: new Date().toISOString(),
           };
-          await this.service.db.insertIfAbsent(this.owner, "memories", value);
+          await this.service.remember(this.owner, value, true);
           return value;
         },
       }),
