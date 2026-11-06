@@ -49,6 +49,12 @@ export interface Config {
     baseUrl: string;
     billing: string;
   };
+  // Slack bridge (the agent's own bot user in the owner's workspace).
+  // Both values come from the Slack app Joseph creates from the manifest
+  // in docs terms; unset means the bridge answers setup challenges but
+  // never acts or posts. See apps/server/src/slack.ts.
+  slackBotToken?: string;
+  slackSigningSecret?: string;
   googleClientId?: string;
   googleClientSecret?: string;
   googleRedirectUri: string;
@@ -120,6 +126,8 @@ export function readConfig(): Config {
       baseUrl: "https://api.groq.com/openai/v1",
       billing: "free_then_paid — auto cut-off if the free route stops being free; never charges",
     },
+    slackBotToken: process.env.SLACK_BOT_TOKEN,
+    slackSigningSecret: process.env.SLACK_SIGNING_SECRET,
     googleClientId: process.env.GOOGLE_CLIENT_ID,
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
     googleRedirectUri: `${publicUrl}/api/google/callback`,
