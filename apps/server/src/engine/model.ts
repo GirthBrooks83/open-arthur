@@ -17,6 +17,31 @@ import {
 import type { AgentService } from "./service.ts";
 import type { TaskContext } from "./worker.ts";
 
+// Truncation visibility (ATLAS audit 2026-11-06, Priority 1): a model
+// call that stops on the per-call output-token cap
+// (MODEL_MAX_OUTPUT_TOKENS) ends with the AI SDK's unified finish
+// reason "length" — verified against the installed stack, not assumed:
+// @ai-sdk/openai maps a Responses `response.incomplete` with
+// incomplete_details.reason "max_output_tokens" (and a Chat
+// Completions finish_reason "length") to unified "length" (ai@6
+// FinishReason: "stop" | "length" | "content-filter" | "tool-calls" |
+// "error" | "other"), and CopilotKit's BuiltInAgent spreads that value
+// onto the AG-UI RUN_FINISHED event as `finishReason`. Before this, a
+// capped result was stored as a plain success, cut mid-sentence with
+// no sign it was cut. When the run's final finish is "length",
+// executeModelTask appends the marker to the stored result, records an
+// "observation" run event, and sets state.truncated on the task.
+export const TRUNCATION_MARKER = "[Output cut at the length limit — ask me to continue.]";
+
+export function isLengthFinish(finishReason: unknown): boolean {
+  return finishReason === "length";
+}
+
+export function withTruncationMarker(text: string): string {
+  if (!text || text.includes(TRUNCATION_MARKER)) return text;
+  return `${text}\n\n${TRUNCATION_MARKER}`;
+}
+
 export async function executeModelTask(
   service: AgentService,
   owner: string,
@@ -379,9 +404,22 @@ export async function executeModelTask(
       );
     });
   let text = "";
+  // Whether the current attempt's final model call stopped on the
+  // output-token cap (RUN_FINISHED finishReason "length"). Reset per
+  // attempt, like text, so a capped attempt that fails over cannot
+  // mark a result a later provider completed cleanly.
+  let truncated = false;
+  // Assistant text as it actually arrives on this raw run stream:
+  // TEXT_MESSAGE_CHUNK deltas (the TEXT_MESSAGE_CONTENT accumulation
+  // in the subscriber only sees the legacy-transformed stream, so it
+  // stays empty here). Used only when a capped run produced no
+  // confirmed outcome, to store the cut text it did produce.
+  let chunkText = "";
   const failures: ProviderFailure[] = [];
   for (let attempt = 0; ; attempt++) {
     text = "";
+    truncated = false;
+    chunkText = "";
     let runError: string | undefined;
     let thrown: unknown;
     try {
@@ -406,6 +444,17 @@ export async function executeModelTask(
               text += event.delta;
             if (event.type === EventType.RUN_ERROR && "message" in event)
               runError = String(event.message);
+            if (
+              event.type === EventType.RUN_FINISHED &&
+              isLengthFinish((event as { finishReason?: unknown }).finishReason)
+            )
+              truncated = true;
+            if (
+              event.type === EventType.TEXT_MESSAGE_CHUNK &&
+              "delta" in event &&
+              typeof event.delta === "string"
+            )
+              chunkText += event.delta;
           },
           error: (error) => {
             clearTimeout(timeout);
@@ -456,13 +505,42 @@ export async function executeModelTask(
     }
     await waitForRetry(delay + 2000);
   }
+  // A capped final call must not pass as a complete answer. Mark the
+  // stored result itself (the text the user reads), and record the cut
+  // structurally as a run event plus a state flag. No auto-continue:
+  // the marker tells the user to ask for the rest.
+  if (truncated && outcome?.status === "succeeded" && typeof outcome.result === "string") {
+    const marked = withTruncationMarker(outcome.result);
+    if (marked !== outcome.result) {
+      await ctx.event(
+        "observation",
+        "Output truncated",
+        "The model call hit the per-call output-token cap, so this result was cut short. The stored result ends with a truncation marker.",
+      );
+      outcome = {
+        ...outcome,
+        result: marked,
+        state: { ...task.state, ...(outcome.state ?? {}), truncated: true },
+      };
+    }
+  } else if (truncated && !outcome && (text || chunkText)) {
+    // No confirmed outcome: the run's own text is what gets stored
+    // (state.lastUpdate below and the "Agent update" event), so the
+    // marker belongs on that text instead.
+    text = withTruncationMarker(text || chunkText);
+    await ctx.event(
+      "observation",
+      "Output truncated",
+      "The model call hit the per-call output-token cap, so this update was cut short. The stored update ends with a truncation marker.",
+    );
+  }
   if (text) await ctx.event("step", "Agent update", text.slice(0, 12000));
   return (
     outcome ?? {
       status: "waiting_input",
       question:
         "The agent reached the end of this run without confirming completion. Give it a follow-up instruction to continue.",
-      state: { ...task.state, lastUpdate: text },
+      state: { ...task.state, lastUpdate: text, ...(truncated && text ? { truncated: true } : {}) },
     }
   );
 }
