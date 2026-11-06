@@ -11,6 +11,12 @@ export interface Config {
   host: string;
   publicUrl: string;
   dataDir: string;
+  // Directory holding the Expo web export (apps/mobile `build:web` output).
+  // When it contains an index.html the API server also serves the app UI
+  // from the same origin, so a single hosted service (e.g. Render's free
+  // plan) can serve both the UI and the API. Unset or missing files mean
+  // API-only, exactly as before.
+  webDir?: string;
   databaseUrl?: string;
   accessKey?: string;
   encryptionKey?: string;
@@ -85,6 +91,7 @@ export function readConfig(): Config {
     host: process.env.HOST ?? (process.env.PORT ? "0.0.0.0" : "127.0.0.1"),
     publicUrl,
     dataDir: resolve(process.env.DATA_DIR ?? ".openmuse"),
+    webDir: resolve(process.env.WEB_DIR ?? "apps/mobile/dist/web"),
     databaseUrl: process.env.DATABASE_URL,
     accessKey: process.env.OPENMUSE_ACCESS_KEY,
     encryptionKey: process.env.TOKEN_ENCRYPTION_KEY,

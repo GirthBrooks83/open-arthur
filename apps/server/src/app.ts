@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { extname, join, normalize } from "node:path";
 import { MessageSchema } from "@ag-ui/core";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -383,8 +385,49 @@ export async function createApp(
     );
     return new Response(body, { status: response.status, headers: response.headers });
   });
-  app.get("/", (c) =>
-    c.json({ name: "OpenMuse", app: "http://localhost:8081", health: "/api/health" }),
-  );
+  // Serve the Expo web export from the same origin as the API when the
+  // build output is present (single-service deploys such as Render's free
+  // plan). Registered after every /api route so API behavior is unchanged;
+  // when no web build exists the root keeps its JSON pointer, as before.
+  const webRoot =
+    config.webDir && existsSync(join(config.webDir, "index.html")) ? config.webDir : undefined;
+  if (webRoot) {
+    const webTypes: Record<string, string> = {
+      ".html": "text/html; charset=utf-8",
+      ".js": "text/javascript; charset=utf-8",
+      ".css": "text/css; charset=utf-8",
+      ".json": "application/json",
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".gif": "image/gif",
+      ".svg": "image/svg+xml",
+      ".ico": "image/x-icon",
+      ".webp": "image/webp",
+      ".woff": "font/woff",
+      ".woff2": "font/woff2",
+      ".ttf": "font/ttf",
+      ".otf": "font/otf",
+      ".txt": "text/plain; charset=utf-8",
+      ".map": "application/json",
+      ".wasm": "application/wasm",
+    };
+    app.get("/*", (c) => {
+      const pathname = decodeURIComponent(new URL(c.req.url).pathname);
+      if (pathname.startsWith("/api/")) return c.json({ error: "Not found" }, 404);
+      const relative = normalize(pathname)
+        .replace(/^[/\\]+/, "")
+        .replace(/^(\.\.[/\\])+/, "");
+      let file = join(webRoot, relative);
+      if (!file.startsWith(webRoot) || !existsSync(file) || !statSync(file).isFile())
+        file = join(webRoot, "index.html");
+      const type = webTypes[extname(file).toLowerCase()] ?? "application/octet-stream";
+      return c.body(readFileSync(file), 200, { "Content-Type": type });
+    });
+  } else {
+    app.get("/", (c) =>
+      c.json({ name: "OpenMuse", app: "http://localhost:8081", health: "/api/health" }),
+    );
+  }
   return { app, auth, files, actions, workspace, agent, computer };
 }

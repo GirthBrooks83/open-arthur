@@ -1,0 +1,32 @@
+# Open Arthur — single-service deploy (UI + API on one origin).
+#
+# This documents the commands the hosted service must run so the public
+# URL serves BOTH the app UI and the API from one process:
+#   build: install, compile the server, and export the Expo web build
+#          into apps/mobile/dist/web (the server's default WEB_DIR).
+#   start: run the compiled server; it serves the web export at / and
+#          the API under /api on the same origin and port.
+# The service this describes already exists (created in the Render
+# dashboard); this file records its intended wiring and can be used to
+# recreate it as a Blueprint. Env var values stay in the dashboard —
+# `sync: false` means Render prompts for them and nothing secret lives here.
+services:
+  - type: web
+    name: openmuse-real
+    env: node
+    plan: free
+    buildCommand: pnpm install --frozen-lockfile && pnpm build
+    startCommand: pnpm start
+    envVars:
+      - key: WORKSPACE_MODE
+        value: live
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: OPENMUSE_ACCESS_KEY
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: PUBLIC_API_URL
+        sync: false
