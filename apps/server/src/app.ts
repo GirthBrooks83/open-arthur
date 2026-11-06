@@ -8,13 +8,14 @@ import { cors } from "hono/cors";
 import { z } from "zod";
 import { emailDraftSchema, proposalSchema } from "../../../packages/domain/src/index.ts";
 import { ActionService } from "./actions.ts";
-import { agentConfigured } from "./agent-config.ts";
+import { agentConfigured, modelProviderKeyPresent } from "./agent-config.ts";
 import { createAuth } from "./auth.ts";
 import { BrowserService } from "./browser.ts";
 import { ComputerService, type DockerRunner } from "./computer.ts";
 import { computerRoutes } from "./computer-routes.ts";
 import type { Config } from "./config.ts";
 import type { Store } from "./db.ts";
+import { buildProviderChain } from "./engine/rate-limit.ts";
 import { agentRoutes } from "./engine/routes.ts";
 import { AgentService } from "./engine/service.ts";
 import { AppError } from "./errors.ts";
@@ -111,6 +112,13 @@ export async function createApp(
       ok: true,
       mode: config.mode,
       agentConfigured: agentConfigured(config),
+      modelRouting: (() => {
+        const chain = buildProviderChain(
+          [config.model, config.fallbackModel, config.fallbackModel2],
+          modelProviderKeyPresent,
+        );
+        return { active: chain[0] ?? config.model ?? null, chain };
+      })(),
       atlasLane: (() => {
         const atlas = config.atlasLane ?? {
           enabled: true,

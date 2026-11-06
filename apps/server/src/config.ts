@@ -21,6 +21,14 @@ export interface Config {
   accessKey?: string;
   encryptionKey?: string;
   model?: string;
+  // Optional fallback models (MODEL_FALLBACK, then MODEL_FALLBACK_2; same
+  // "<provider>/<model-id>" form as MODEL). Together they form the ordered
+  // provider chain: when a provider's quota is exhausted for a run (e.g. a
+  // daily free-tier cap), the task engine fails over to the next configured
+  // model whose provider key is present, records the switch in the task's
+  // events, and continues. Each provider's own key must be configured.
+  fallbackModel?: string;
+  fallbackModel2?: string;
   agentBackend: "sample" | "model" | "agui";
   agentUrl?: string;
   agentToken?: string;
@@ -96,6 +104,8 @@ export function readConfig(): Config {
     accessKey: process.env.OPENMUSE_ACCESS_KEY,
     encryptionKey: process.env.TOKEN_ENCRYPTION_KEY,
     model: process.env.MODEL,
+    fallbackModel: process.env.MODEL_FALLBACK,
+    fallbackModel2: process.env.MODEL_FALLBACK_2,
     agentBackend: backend,
     agentUrl: process.env.AGENT_URL,
     agentToken: process.env.AGENT_TOKEN,
