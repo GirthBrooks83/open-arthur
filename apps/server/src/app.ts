@@ -186,6 +186,12 @@ export async function createApp(
         // merges their facts. The other lanes below remain
         // configuration-only for now.
         mem0Wired: Boolean(config.integrations?.mem0Url),
+        // Agent browser (Stagehand): the adapter ships in this
+        // codebase (extract_web tool -> worker POST /extract), so
+        // agentBrowserWired is a code fact, while agentBrowser is the
+        // operator enablement state (server opt-in + worker present).
+        agentBrowser: Boolean(config.agentBrowserEnabled && config.workerUrl && config.workerToken),
+        agentBrowserWired: true,
         graphiti: Boolean(config.integrations?.graphitiUrl),
         graphitiWired: Boolean(config.integrations?.graphitiUrl),
         hindsight: Boolean(config.integrations?.hindsightUrl),

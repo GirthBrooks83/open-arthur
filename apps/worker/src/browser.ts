@@ -10,6 +10,7 @@ import {
 import { WorkerError } from "./errors.ts";
 import { validatePublicUrl } from "./network.ts";
 import { startEgressProxy } from "./proxy.ts";
+import { createStagehandExtractor, type StagehandModule } from "./stagehand.ts";
 
 export interface Session {
   id: string;
@@ -38,6 +39,14 @@ export async function createBrowserManager(options: {
   maxSessions?: number;
   idleTimeoutMs?: number;
   allowFakeIpRange?: boolean;
+  // Agent browser (Stagehand) extraction. Absent = the lane is off and
+  // /extract answers 501; the Playwright session surface is unaffected.
+  stagehand?: {
+    ollamaUrl: string;
+    model: string;
+    chromiumPath?: string;
+    loadModule?: () => Promise<StagehandModule>;
+  };
 }) {
   const { dataDir, maxSessions = 3, idleTimeoutMs = 30 * 60_000 } = options;
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
@@ -46,6 +55,13 @@ export async function createBrowserManager(options: {
   const queues = new Map<string, Promise<unknown>>();
   const proxy = await startEgressProxy(options.allowFakeIpRange);
   const validate = (url: string) => validatePublicUrl(url, undefined, options.allowFakeIpRange);
+  const extractor = options.stagehand
+    ? createStagehandExtractor({
+        ...options.stagehand,
+        userDataDir: join(dataDir, "stagehand-profile"),
+        proxyUrl: proxy.url,
+      })
+    : undefined;
   for (const id of await readdir(dataDir)) {
     if (!SESSION_ID.test(id)) continue;
     try {
@@ -380,10 +396,26 @@ export async function createBrowserManager(options: {
         throw new WorkerError("DOWNLOAD_TOO_LARGE", "The PDF exceeds 10 MiB.", 413);
       return { metadata, bytes: await readFile(path) };
     },
+    extract: async (url: string, instruction: string, fields?: string[]) => {
+      if (!extractor)
+        throw new WorkerError(
+          "STAGEHAND_DISABLED",
+          "The agent browser (Stagehand) is not enabled on this worker. Start it with WORKER_STAGEHAND_ENABLED=true.",
+          501,
+        );
+      const target = await validate(url);
+      const result = await extractor.extract(target.url.href, instruction, fields);
+      // Redirects land wherever the page sends them; the final location
+      // must pass the same public-destination guard as the request. The
+      // egress proxy additionally blocks non-public sockets en route.
+      await validate(result.url);
+      return result;
+    },
     close: async () => {
       clearInterval(sweeper);
       await Promise.allSettled([...queues.values()]);
       await Promise.allSettled([...running.keys()].map(closeSession));
+      await extractor?.close();
       await proxy.close();
     },
   };

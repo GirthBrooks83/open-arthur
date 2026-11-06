@@ -71,6 +71,13 @@ export interface Config {
   googleRedirectUri: string;
   workerUrl?: string;
   workerToken?: string;
+  // Agent browser (Stagehand) enablement on the API side. The browser
+  // worker does the actual Stagehand work (POST /extract, behind
+  // WORKER_STAGEHAND_ENABLED on the worker); this flag is the server's
+  // opt-in to offer the extract_web tool to the agent. Optional in the
+  // type because tests and embedders construct Config literals; unset
+  // means off, exactly as before.
+  agentBrowserEnabled?: boolean;
   taskWorkerEnabled?: boolean;
   computerEnabled?: boolean;
   computerImage?: string;
@@ -168,6 +175,7 @@ export function readConfig(): Config {
     googleRedirectUri: `${publicUrl}/api/google/callback`,
     workerUrl: process.env.BROWSER_WORKER_URL,
     workerToken: process.env.WORKER_TOKEN,
+    agentBrowserEnabled: process.env.AGENT_BROWSER_ENABLED === "true",
     taskWorkerEnabled: process.env.TASK_WORKER_ENABLED !== "false",
     computerEnabled: process.env.COMPUTER_ENABLED === "true",
     computerImage: process.env.COMPUTER_IMAGE ?? "openmuse-computer:local",
