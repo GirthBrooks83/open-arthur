@@ -10,7 +10,7 @@ import {
   goalInputSchema,
   monitorInputSchema,
 } from "../../../../packages/domain/src/agent.ts";
-import { modelProviderKeyPresent } from "../agent-config.ts";
+import { modelCallOptions, modelProviderKeyPresent } from "../agent-config.ts";
 import { computerInstructions, computerTools } from "../computer-tools.ts";
 import type { Config } from "../config.ts";
 import { buildProviderChain } from "./rate-limit.ts";
@@ -225,6 +225,10 @@ export class ConversationAgent extends AbstractAgent {
         )[0] ??
         this.config.model ??
         "openai/unconfigured",
+      // Same per-call output-token cap as the task engine
+      // (MODEL_MAX_OUTPUT_TOKENS) — chat calls budget against the
+      // provider's per-minute output allowance too.
+      ...modelCallOptions(this.config),
       maxSteps: 6,
       maxRetries: 2,
       tools,

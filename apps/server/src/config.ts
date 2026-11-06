@@ -29,6 +29,17 @@ export interface Config {
   // events, and continues. Each provider's own key must be configured.
   fallbackModel?: string;
   fallbackModel2?: string;
+  // Optional cap on the tokens a single model call may generate
+  // (MODEL_MAX_OUTPUT_TOKENS, positive integer; unset or invalid = no
+  // cap, exactly as before). Free-tier providers budget EXPECTED output
+  // per minute (Groq's OTPM grants 1000 tokens/min on this account), and
+  // a call whose expected output exceeds the whole budget is rejected
+  // outright — no retry or failover can save it, because every provider
+  // in the chain would be asked for the same oversized call. Capping the
+  // per-call output keeps each call inside the budget; the engine's
+  // multi-step loop still lets a task produce as much as it needs across
+  // calls.
+  maxOutputTokens?: number;
   agentBackend: "sample" | "model" | "agui";
   agentUrl?: string;
   agentToken?: string;
@@ -85,6 +96,29 @@ export interface IntegrationEndpoints {
   n8nUrl?: string;
   anythingLlmUrl?: string;
 }
+let warnedInvalidMaxOutputTokens = false;
+
+// MODEL_MAX_OUTPUT_TOKENS: a positive integer caps the tokens a single
+// model call may generate (see Config.maxOutputTokens). Anything else —
+// non-numeric, zero, negative, fractional — is treated as unset (no cap)
+// and warned about once, so a typo in the environment never silently
+// changes model behavior or spams the log on every config read.
+export function parseMaxOutputTokens(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const value = Number(trimmed);
+    if (Number.isSafeInteger(value) && value > 0) return value;
+  }
+  if (!warnedInvalidMaxOutputTokens) {
+    warnedInvalidMaxOutputTokens = true;
+    console.warn(
+      `MODEL_MAX_OUTPUT_TOKENS=${JSON.stringify(raw)} is not a positive integer; ignoring it (no per-call output-token cap).`,
+    );
+  }
+  return undefined;
+}
+
 export function readConfig(): Config {
   const mode = process.env.WORKSPACE_MODE ?? "sample";
   if (mode !== "sample" && mode !== "live")
@@ -112,6 +146,7 @@ export function readConfig(): Config {
     model: process.env.MODEL,
     fallbackModel: process.env.MODEL_FALLBACK,
     fallbackModel2: process.env.MODEL_FALLBACK_2,
+    maxOutputTokens: parseMaxOutputTokens(process.env.MODEL_MAX_OUTPUT_TOKENS),
     agentBackend: backend,
     agentUrl: process.env.AGENT_URL,
     agentToken: process.env.AGENT_TOKEN,
