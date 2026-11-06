@@ -32,6 +32,20 @@ export function modelProviderKeyPresent(model?: string): boolean {
   );
 }
 
+// The BuiltInAgent constructor options that apply the configured
+// per-call output-token cap (MODEL_MAX_OUTPUT_TOKENS). Empty when no cap
+// is configured, so spreading the result into a constructor leaves the
+// agent exactly as before. BuiltInAgent forwards `maxOutputTokens`
+// verbatim into the AI SDK streamText call (it is one of the runtime's
+// streamText-mirroring config properties), which is what makes the cap
+// effective at the provider: the provider budgets the call's expected
+// output against its per-minute output allowance (e.g. Groq OTPM).
+export function modelCallOptions(config: Pick<Config, "maxOutputTokens">): {
+  maxOutputTokens?: number;
+} {
+  return config.maxOutputTokens ? { maxOutputTokens: config.maxOutputTokens } : {};
+}
+
 export function agentConfigured(config: Config) {
   return (
     config.agentBackend === "sample" ||

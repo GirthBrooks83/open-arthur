@@ -5,7 +5,7 @@ import { BuiltInAgent, defineTool } from "@copilotkit/runtime/v2";
 import { z } from "zod";
 import type { AgentTask } from "../../../../packages/domain/src/agent.ts";
 import { emailDraftSchema, eventDraftSchema } from "../../../../packages/domain/src/index.ts";
-import { modelProviderKeyPresent } from "../agent-config.ts";
+import { modelCallOptions, modelProviderKeyPresent } from "../agent-config.ts";
 import { computerInstructions, computerTools } from "../computer-tools.ts";
 import {
   allProvidersExhaustedMessage,
@@ -289,6 +289,9 @@ export async function executeModelTask(
   const makeAgent = (model: string) =>
     new BuiltInAgent({
       model,
+      // Per-call output-token cap (MODEL_MAX_OUTPUT_TOKENS) — failover
+      // rebuilds the agent per provider, and every rebuild keeps the cap.
+      ...modelCallOptions(config),
       maxSteps: 16,
       maxRetries: 2,
       tools,
