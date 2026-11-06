@@ -20,6 +20,7 @@ import { AgentService } from "./engine/service.ts";
 import { AppError } from "./errors.ts";
 import { Files } from "./files.ts";
 import { GoogleAuth } from "./google-auth.ts";
+import { slackConfigured, slackRoutes } from "./slack.ts";
 import { WorkspaceService } from "./workspace.ts";
 
 export async function createApp(
@@ -132,6 +133,7 @@ export async function createApp(
         };
       })(),
       browserConfigured: Boolean(config.workerUrl && config.workerToken),
+      slack: { configured: slackConfigured(config) },
       integrations: {
         omniroute: Boolean(config.integrations?.omnirouteUrl),
         mem0: Boolean(config.integrations?.mem0Url),
@@ -169,6 +171,10 @@ export async function createApp(
       "<h1>Google is connected</h1><p>Return to OpenMuse and refresh your workspace.</p>",
     );
   });
+  // Slack Events API: public by design — Slack authenticates with its
+  // signing secret, not our session auth — so it mounts before the
+  // /api/* auth middleware, like /api/session and the Google callback.
+  app.route("/api/slack", slackRoutes(config, agent));
   app.use("/api/*", async (c, next) => {
     const signedRoute =
       /^\/api\/files\/[^/]+\/content$|^\/api\/browsers\/[^/]+\/(?:preview|console)$/.test(
