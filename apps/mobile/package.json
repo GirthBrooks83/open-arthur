@@ -6,7 +6,8 @@
   "scripts": {
     "start": "expo start --dev-client",
     "web": "expo start --web --port 8081",
-    "build:web": "expo export --platform web --output-dir dist/web",
+    "build:web": "expo export --platform web --output-dir dist/web && node scripts/build-local-brain.mjs --with-dist",
+    "build:local-brain": "node scripts/build-local-brain.mjs",
     "build:ios": "expo export --platform ios --output-dir dist/ios",
     "build:android": "expo export --platform android --output-dir dist/android",
     "typecheck": "tsc --noEmit",
@@ -38,7 +39,9 @@
   "devDependencies": {
     "@config-plugins/react-native-blob-util": "^12.0.0",
     "@config-plugins/react-native-pdf": "^12.0.0",
+    "@mlc-ai/web-llm": "^0.2.87",
     "@types/react": "~19.1.0",
+    "esbuild": "^0.28.2",
     "typescript": "~5.9.2"
   }
 }
