@@ -285,9 +285,9 @@ export async function executeModelTask(
     "agent-settings",
     "identity",
   );
-  // Recall: internal memories merged with Mem0-lane facts for this
-  // task's prompt (the lane is the main memory lane; the internal store
-  // stays canonical and is the fallback when the lane is down).
+  // Recall: internal memories merged with memory-lane facts for this
+  // task's prompt (Mem0 main lane, Graphiti side lane; the internal
+  // store stays canonical and is the fallback when a lane is down).
   const memories = await service.recallMemories(owner, task.prompt);
   const makeAgent = (model: string) =>
     new BuiltInAgent({

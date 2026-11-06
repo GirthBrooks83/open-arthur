@@ -33,6 +33,7 @@ import type { Files } from "../files.ts";
 import { backgroundFailure } from "../log.ts";
 import type { WorkspaceService } from "../workspace.ts";
 import { analyzeSpending } from "./finance.ts";
+import { type GraphitiLane, graphitiLaneFor } from "./graphiti.ts";
 import { type Mem0Lane, mem0LaneFor } from "./mem0.ts";
 import { executeModelTask } from "./model.ts";
 import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
@@ -46,6 +47,10 @@ export class AgentService {
   // every lane call is failure-swallowing (see engine/mem0.ts), so the
   // internal store below remains the canonical memory either way.
   readonly mem0: Mem0Lane;
+  // Graphiti, the side memory lane (supersession: it retires facts that
+  // newer facts replace). Configured only when GRAPHITI_URL is set;
+  // failure-swallowing like Mem0 (see engine/graphiti.ts).
+  readonly graphiti: GraphitiLane;
   private maintenance?: ReturnType<typeof setInterval>;
   private refreshing = false;
   constructor(
@@ -58,15 +63,17 @@ export class AgentService {
     readonly computer: ComputerService = new ComputerService(db, config),
   ) {
     this.mem0 = mem0LaneFor(config);
+    this.graphiti = graphitiLaneFor(config);
     this.worker = new TaskWorker(db, (owner, task, context) => this.execute(owner, task, context), {
       settled: (owner, task) => this.publishOutcome(owner, task),
     });
   }
   // Save a memory to the internal store (canonical — this is the write
-  // that must succeed), then mirror it to the Mem0 lane. The mirror is
-  // awaited so callers and tests can rely on it having been attempted,
-  // but a lane failure never fails the save: Mem0Lane.add reports by
-  // value, and the catch here is belt-and-braces.
+  // that must succeed), then mirror it to the memory lanes (Mem0, the
+  // main lane, and Graphiti, the side lane). The mirrors are awaited so
+  // callers and tests can rely on them having been attempted, but a
+  // lane failure never fails the save: lane adds report by value, and
+  // the catches here are belt-and-braces.
   async remember(owner: string, memory: AgentMemory, ifAbsent = false): Promise<AgentMemory> {
     const saved = ifAbsent
       ? await this.db.insertIfAbsent(owner, "memories", memory)
@@ -74,32 +81,51 @@ export class AgentService {
     // Mirror only when this call actually stored the memory (an
     // insertIfAbsent that found an existing record returns null; that
     // record was already mirrored when it was first saved).
-    if ((saved !== null || !ifAbsent) && this.mem0.configured)
-      await this.mem0.add(memory.text).catch(() => false);
+    if (saved !== null || !ifAbsent) {
+      if (this.mem0.configured) await this.mem0.add(memory.text).catch(() => false);
+      if (this.graphiti.configured) await this.graphiti.add(memory.text).catch(() => false);
+    }
     return saved ?? memory;
   }
   // Recall for agent context: the internal list, merged with facts the
-  // Mem0 lane surfaces for the query. Lane facts the internal store
-  // already holds (same text, case/whitespace-insensitive) are not
-  // duplicated. With no query, no lane configured, or the lane down,
-  // this is exactly the internal list — the pre-adapter behavior.
+  // memory lanes surface for the query — Mem0 (main lane) first, then
+  // Graphiti (side lane). Lane facts the internal store already holds,
+  // or that another lane already contributed (same text, case/
+  // whitespace-insensitive), are not duplicated. With no query, no
+  // lane configured, or the lanes down, this is exactly the internal
+  // list — the pre-adapter behavior.
   async recallMemories(owner: string, query?: string): Promise<AgentMemory[]> {
     const internal = await this.db.list<AgentMemory>(owner, "memories");
-    if (!query || !this.mem0.configured) return internal;
-    const facts = await this.mem0.search(query).catch(() => [] as string[]);
-    if (!facts.length) return internal;
+    if (!query) return internal;
     const normalize = (text: string) => text.trim().replace(/\s+/g, " ").toLowerCase();
     const known = new Set(internal.map((memory) => normalize(memory.text)));
-    const extra: AgentMemory[] = facts
-      .filter((fact) => !known.has(normalize(fact)))
-      .map((fact) => ({
-        id: `mem0-${hash(fact)}`,
-        text: fact,
-        source: "Mem0 (main memory lane)",
-        // The lane's search reply carries no timestamps; epoch marks
-        // "date unknown" instead of inventing one.
-        createdAt: new Date(0).toISOString(),
-      }));
+    const extra: AgentMemory[] = [];
+    const merge = (facts: string[], prefix: string, source: string) => {
+      for (const fact of facts) {
+        if (known.has(normalize(fact))) continue;
+        known.add(normalize(fact));
+        extra.push({
+          id: `${prefix}-${hash(fact)}`,
+          text: fact,
+          source,
+          // The lanes' search replies carry no timestamps; epoch marks
+          // "date unknown" instead of inventing one.
+          createdAt: new Date(0).toISOString(),
+        });
+      }
+    };
+    if (this.mem0.configured)
+      merge(
+        await this.mem0.search(query).catch(() => [] as string[]),
+        "mem0",
+        "Mem0 (main memory lane)",
+      );
+    if (this.graphiti.configured)
+      merge(
+        await this.graphiti.search(query).catch(() => [] as string[]),
+        "graphiti",
+        "Graphiti (side memory lane)",
+      );
     return extra.length ? [...internal, ...extra] : internal;
   }
   start() {
