@@ -1,7 +1,17 @@
 import { Platform } from "react-native";
 
+// In a production web build served by the API server itself (single-origin
+// deploys such as Render), the API lives on the page's own origin, so use
+// relative requests. Dev web builds keep the separate dev API on :8787,
+// and EXPO_PUBLIC_API_URL always wins when set.
+const sameOrigin =
+  Platform.OS === "web" && process.env.NODE_ENV === "production" && typeof window !== "undefined"
+    ? window.location.origin
+    : undefined;
+
 export const API_URL = (
   process.env.EXPO_PUBLIC_API_URL ||
+  sameOrigin ||
   (Platform.OS === "android" ? "http://10.0.2.2:8787" : "http://localhost:8787")
 ).replace(/\/$/, "");
 
