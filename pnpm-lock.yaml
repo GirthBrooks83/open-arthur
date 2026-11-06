@@ -139,9 +139,15 @@ importers:
       '@config-plugins/react-native-pdf':
         specifier: ^12.0.0
         version: 12.0.0(expo@54.0.37)
+      '@mlc-ai/web-llm':
+        specifier: ^0.2.87
+        version: 0.2.87
       '@types/react':
         specifier: ~19.1.0
         version: 19.1.17
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
       typescript:
         specifier: ~5.9.2
         version: 5.9.3
@@ -1566,6 +1572,9 @@ packages:
         optional: true
       '@opentelemetry/api-logs':
         optional: true
+
+  '@mlc-ai/web-llm@0.2.87':
+    resolution: {integrity: sha512-34N19988MdaEtzh8Mq/IOrfKCk2HRDOrXgEkLT28r3aiyAU6ZJSUB+v35t7zyU+0QEaFl91Y4U5SuPN/cwoHNw==}
 
   '@modelcontextprotocol/ext-apps@1.7.5':
     resolution: {integrity: sha512-TjPH2S2y5UEGKhmI6+XGFuqfqOV4ppe1x6DA3txnUaEWkgtA4G5vo14jGKFZmegdkZ1H4QMLyujLvoU1BEdnAg==}
@@ -4183,6 +4192,10 @@ packages:
   log-symbols@2.2.0:
     resolution: {integrity: sha512-VeIAFslyIerEJLXHziedo2basKbMKtTw3vfn5IzG0XTjhAVEJyNHnL2p7vc+wBDSdQuUpNw3M2u6xb9QsAY5Eg==}
     engines: {node: '>=4'}
+
+  loglevel@1.9.2:
+    resolution: {integrity: sha512-HgMmCqIJSAKqo68l0rS2AanEWfkxaZ5wNiEFb5ggm08lDs9Xl2KxBlX3PTcaD2chBM1gXAYf491/M2Rv8Jwayg==}
+    engines: {node: '>= 0.6.0'}
 
   longest-streak@3.1.0:
     resolution: {integrity: sha512-9Ri+o0JYgehTaVBBDoMqIl8GXtbWg711O3srftcHhZ0dqnETqLaoIK0x17fUw9rFSlK/0NlsKe0Ahhyl5pXE2g==}
@@ -8039,6 +8052,10 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  '@mlc-ai/web-llm@0.2.87':
+    dependencies:
+      loglevel: 1.9.2
+
   '@modelcontextprotocol/ext-apps@1.7.5(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@8.1.1)(zod@4.6.5))(react-dom@19.1.0(react@19.1.0))(react@19.1.0)(zod@4.6.5)':
     dependencies:
       '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(supports-color@8.1.1)(zod@4.6.5)
@@ -11061,6 +11078,8 @@ snapshots:
   log-symbols@2.2.0:
     dependencies:
       chalk: 2.4.2
+
+  loglevel@1.9.2: {}
 
   longest-streak@3.1.0: {}
 

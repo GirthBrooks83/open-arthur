@@ -22,10 +22,12 @@ import { z } from "zod";
 import { ArtifactCard } from "./agent-ui";
 import { useAgentWorkspace } from "./agent-workspace";
 import { BackgroundUpdates } from "./background-updates";
+import { type BrainMode, brainBadge, initialLocalBrainState } from "./brain";
 import { BrowserRunContext, BrowserToolCard } from "./browser-tool-card";
 import { BrowserThreadCard } from "./computer";
 import { ConversationQueue, type QueuedMessage } from "./conversation-queue";
 import { runConversationTurn } from "./conversation-run";
+import { LocalBrainChat } from "./local-brain";
 import { MailToolCard } from "./mail-tool-card";
 import { FileThreadCard, TaskThreadCard } from "./thread-artifacts";
 import { type Selection, useMuseThread } from "./threads";
@@ -182,6 +184,7 @@ export function ChatScreen({
   const { copilotkit } = useCopilotKit();
   const renderToolCall = useRenderToolCall();
   const [draft, setDraft] = useState("");
+  const [brainMode, setBrainMode] = useState<BrainMode>("cloud");
   const [focused, setFocused] = useState(false);
   const [inputHeight, setInputHeight] = useState(44);
   const [showResults, setShowResults] = useState(false);
@@ -338,8 +341,58 @@ export function ChatScreen({
   );
   const visible = messages.filter((m) => m.role === "user" || m.role === "assistant");
   const replying = busy || agent.isRunning;
+  const brainToggle = (
+    <View style={{ gap: 6, paddingBottom: 10 }}>
+      <View style={[s.row, { gap: 8 }]}>
+        {(
+          [
+            { mode: "cloud", label: "Cloud" },
+            { mode: "local", label: "On this phone" },
+          ] as const
+        ).map((option) => {
+          const selected = brainMode === option.mode;
+          return (
+            <Pressable
+              key={option.mode}
+              accessibilityRole="button"
+              accessibilityLabel={`Use the ${option.label} brain`}
+              accessibilityState={{ selected }}
+              onPress={() => setBrainMode(option.mode)}
+              style={{
+                paddingHorizontal: 14,
+                paddingVertical: 8,
+                borderRadius: 18,
+                borderWidth: 1,
+                borderColor: selected ? colors.blueDark : "#EEF0F2",
+                backgroundColor: selected ? colors.sky : "#FFF",
+              }}
+            >
+              <Text
+                style={{ fontSize: 13, fontWeight: selected ? "700" : "500", color: colors.text }}
+              >
+                {option.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+      <Text style={s.small}>
+        {brainMode === "cloud"
+          ? brainBadge("cloud", initialLocalBrainState)
+          : "Brain: On this phone — small local model, chat only, nothing leaves the device"}
+      </Text>
+    </View>
+  );
+  if (brainMode === "local")
+    return (
+      <View style={{ flex: 1 }}>
+        {brainToggle}
+        <LocalBrainChat />
+      </View>
+    );
   return (
     <View style={{ flex: 1 }}>
+      {brainToggle}
       <ScrollView
         ref={list}
         showsVerticalScrollIndicator={false}
