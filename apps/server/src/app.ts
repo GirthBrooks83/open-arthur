@@ -4,12 +4,13 @@ import { extname, join, normalize } from "node:path";
 import { MessageSchema } from "@ag-ui/core";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { getCookie, setCookie } from "hono/cookie";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import { emailDraftSchema, proposalSchema } from "../../../packages/domain/src/index.ts";
 import { ActionService } from "./actions.ts";
 import { agentConfigured, modelProviderKeyPresent } from "./agent-config.ts";
-import { createAuth } from "./auth.ts";
+import { createAuth, LINK_COOKIE, LINK_SESSION_TTL_MS } from "./auth.ts";
 import { BrowserService } from "./browser.ts";
 import { ComputerService, type DockerRunner } from "./computer.ts";
 import { computerRoutes } from "./computer-routes.ts";
@@ -89,6 +90,40 @@ export async function createApp(
       onError: (c) => c.json({ error: "Request is too large; PDFs must be 10 MB or smaller" }, 413),
     }),
   );
+  // Bookmark sign-in: opening the app once with ?key=<access key>
+  // trades the key for a long-lived session cookie, then redirects to
+  // the clean URL so the key does not stay in the address bar. Later
+  // visits send the cookie, and /api/session opens with no typing.
+  // The lock itself is unchanged — a keyless first visit is still
+  // refused, and the typed-key form still works.
+  let linkWindow = 0,
+    linkAttempts = 0;
+  app.use("*", async (c, next) => {
+    const key =
+      c.req.method === "GET" && !c.req.path.startsWith("/api/") ? c.req.query("key") : undefined;
+    if (key === undefined) return next();
+    if (Date.now() - linkWindow > 60000) {
+      linkWindow = Date.now();
+      linkAttempts = 0;
+    }
+    if (++linkAttempts > 30) return next();
+    const clean = new URL(c.req.url);
+    clean.searchParams.delete("key");
+    try {
+      const link = await auth.linkSession(key);
+      setCookie(c, LINK_COOKIE, link.token, {
+        httpOnly: true,
+        secure: config.publicUrl.startsWith("https://"),
+        sameSite: "Lax",
+        path: "/",
+        maxAge: Math.floor(LINK_SESSION_TTL_MS / 1000),
+      });
+    } catch {
+      // Wrong key: no cookie and no hint — the clean URL shows the
+      // ordinary key form, exactly like a keyless visit.
+    }
+    return c.redirect(clean.pathname + clean.search, 302);
+  });
   app.onError((error, c) => {
     if (error instanceof z.ZodError)
       return c.json({ error: error.issues.map((i) => i.message).join("; ") }, 422);
@@ -168,7 +203,7 @@ export async function createApp(
     if (++loginAttempts > 30)
       throw new AppError("Too many sign-in attempts. Try again in a minute.", 429);
     const body = z.object({ accessKey: z.string().optional() }).parse(await c.req.json());
-    const session = await auth.session(body.accessKey);
+    const session = await auth.session(body.accessKey, getCookie(c, LINK_COOKIE));
     await workspace.ensureSample("local-user", actions);
     await agent.ensure("local-user");
     if (config.mode === "sample") await agent.refreshIdeas("local-user");
