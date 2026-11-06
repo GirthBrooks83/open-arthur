@@ -42,6 +42,18 @@ export function withTruncationMarker(text: string): string {
   return `${text}\n\n${TRUNCATION_MARKER}`;
 }
 
+// The question stored when a run ends with NO confirmed outcome: no
+// finish_task, no ask_user, no prepared action — the agent simply
+// stopped (ATLAS audit 2026-11-06, Priority 1: a trivial task parked
+// in waiting_input with this message and silently stalled). This is
+// the ONLY waiting_input outcome the service's bounded auto-continue
+// (engine/service.ts) acts on: genuine agent questions — ask_user's
+// own question text, the document workflow's field prompt — are
+// different strings and keep parking for the user exactly as before,
+// as does the missing-model configuration message above.
+export const UNCONFIRMED_RUN_QUESTION =
+  "The agent reached the end of this run without confirming completion. Give it a follow-up instruction to continue.";
+
 export async function executeModelTask(
   service: AgentService,
   owner: string,
@@ -538,8 +550,7 @@ export async function executeModelTask(
   return (
     outcome ?? {
       status: "waiting_input",
-      question:
-        "The agent reached the end of this run without confirming completion. Give it a follow-up instruction to continue.",
+      question: UNCONFIRMED_RUN_QUESTION,
       state: { ...task.state, lastUpdate: text, ...(truncated && text ? { truncated: true } : {}) },
     }
   );

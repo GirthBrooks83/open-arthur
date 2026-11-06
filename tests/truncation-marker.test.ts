@@ -42,6 +42,7 @@ async function runFixtureTask(
   t: Parameters<typeof modelFixture>[0],
   reply: Parameters<typeof modelFixture>[1],
   prompt: string,
+  ticks = 1,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "openmuse-truncation-"));
   const db = await createStore();
@@ -64,7 +65,7 @@ async function runFixtureTask(
   );
   try {
     const task = await server.agent.createTask("owner", { prompt, kind: "agent" });
-    await server.agent.worker.tick();
+    for (let i = 0; i < ticks; i++) await server.agent.worker.tick();
     return await server.agent.detail("owner", task.id);
   } finally {
     await server.agent.stop();
@@ -99,10 +100,15 @@ test("a capped finish marks the stored result and records the truncation", async
 
 test("a capped run with no confirmed outcome marks the stored update text", async (t) => {
   const cutText = "1. Match the light.\n4. Water the bed";
+  // Two ticks: the first unconfirmed end now auto-continues once
+  // (bounded auto-continue, engine/service.ts); the continuation run
+  // ends unconfirmed too, so the task parks in waiting_input, where
+  // the stored update text is checked.
   const detail = await runFixtureTask(
     t,
     () => ({ text: cutText, incomplete: true }),
     "List 10 practical tips for keeping a houseplant alive indoors",
+    2,
   );
   assert.equal(detail.task.status, "waiting_input", detail.task.error ?? undefined);
   assert.equal(detail.task.state.lastUpdate, `${cutText}\n\n${TRUNCATION_MARKER}`);
