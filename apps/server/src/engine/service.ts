@@ -34,6 +34,7 @@ import { backgroundFailure } from "../log.ts";
 import type { WorkspaceService } from "../workspace.ts";
 import { analyzeSpending } from "./finance.ts";
 import { type GraphitiLane, graphitiLaneFor } from "./graphiti.ts";
+import { type HindsightLane, hindsightLaneFor } from "./hindsight.ts";
 import { type Mem0Lane, mem0LaneFor } from "./mem0.ts";
 import { executeModelTask } from "./model.ts";
 import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
@@ -51,6 +52,10 @@ export class AgentService {
   // newer facts replace). Configured only when GRAPHITI_URL is set;
   // failure-swallowing like Mem0 (see engine/graphiti.ts).
   readonly graphiti: GraphitiLane;
+  // Hindsight, the third memory lane (consolidated, correction-aware
+  // recall). Configured only when HINDSIGHT_URL is set;
+  // failure-swallowing like the other lanes (see engine/hindsight.ts).
+  readonly hindsight: HindsightLane;
   private maintenance?: ReturnType<typeof setInterval>;
   private refreshing = false;
   constructor(
@@ -64,13 +69,15 @@ export class AgentService {
   ) {
     this.mem0 = mem0LaneFor(config);
     this.graphiti = graphitiLaneFor(config);
+    this.hindsight = hindsightLaneFor(config);
     this.worker = new TaskWorker(db, (owner, task, context) => this.execute(owner, task, context), {
       settled: (owner, task) => this.publishOutcome(owner, task),
     });
   }
   // Save a memory to the internal store (canonical — this is the write
   // that must succeed), then mirror it to the memory lanes (Mem0, the
-  // main lane, and Graphiti, the side lane). The mirrors are awaited so
+  // main lane, Graphiti, the side lane, and Hindsight, the third lane).
+  // The mirrors are awaited so
   // callers and tests can rely on them having been attempted, but a
   // lane failure never fails the save: lane adds report by value, and
   // the catches here are belt-and-braces.
@@ -84,12 +91,14 @@ export class AgentService {
     if (saved !== null || !ifAbsent) {
       if (this.mem0.configured) await this.mem0.add(memory.text).catch(() => false);
       if (this.graphiti.configured) await this.graphiti.add(memory.text).catch(() => false);
+      if (this.hindsight.configured) await this.hindsight.add(memory.text).catch(() => false);
     }
     return saved ?? memory;
   }
   // Recall for agent context: the internal list, merged with facts the
   // memory lanes surface for the query — Mem0 (main lane) first, then
-  // Graphiti (side lane). Lane facts the internal store already holds,
+  // Graphiti (side lane), then Hindsight (third lane). Lane facts the
+  // internal store already holds,
   // or that another lane already contributed (same text, case/
   // whitespace-insensitive), are not duplicated. With no query, no
   // lane configured, or the lanes down, this is exactly the internal
@@ -125,6 +134,12 @@ export class AgentService {
         await this.graphiti.search(query).catch(() => [] as string[]),
         "graphiti",
         "Graphiti (side memory lane)",
+      );
+    if (this.hindsight.configured)
+      merge(
+        await this.hindsight.search(query).catch(() => [] as string[]),
+        "hindsight",
+        "Hindsight (third memory lane)",
       );
     return extra.length ? [...internal, ...extra] : internal;
   }
