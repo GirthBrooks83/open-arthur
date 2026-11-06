@@ -36,8 +36,16 @@ import { analyzeSpending } from "./finance.ts";
 import { type GraphitiLane, graphitiLaneFor } from "./graphiti.ts";
 import { type HindsightLane, hindsightLaneFor } from "./hindsight.ts";
 import { type Mem0Lane, mem0LaneFor } from "./mem0.ts";
-import { executeModelTask } from "./model.ts";
+import { executeModelTask, UNCONFIRMED_RUN_QUESTION } from "./model.ts";
 import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
+
+// Bounded auto-continue (ATLAS audit 2026-11-06, Priority 1): the
+// follow-up instruction the service itself issues — through the same
+// state.answer channel a user's reply uses, so the continuation is an
+// ordinary run whose prompt carries it — the FIRST time a model run
+// ends without confirming completion. See autoContinueIfUnconfirmed.
+export const AUTO_CONTINUE_INSTRUCTION =
+  "Automatic follow-up from the system: your previous run ended without confirming completion. Continue this task now and finish it — complete the remaining work, then call finish_task with the result. Call ask_user only if you genuinely need a fact or decision from the user. Do not end this run without calling finish_task or ask_user.";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const date = () => new Date().toISOString();
@@ -822,7 +830,46 @@ export class AgentService {
       });
       return this.finish(task, context, artifact.summary);
     }
-    return executeModelTask(this, owner, task, context);
+    const result = await executeModelTask(this, owner, task, context);
+    return this.autoContinueIfUnconfirmed(task, result, context);
+  }
+  // A model run that ends unconfirmed used to park the task in
+  // waiting_input indefinitely — no answer, no failure, a silent stall
+  // from the user's seat. The FIRST time that happens for a task,
+  // issue the follow-up the canned message asks for automatically:
+  // requeue the task with AUTO_CONTINUE_INSTRUCTION in state.answer
+  // (the channel a user's reply uses) and record the continuation as a
+  // run event, so it is visible in the task's event log. The spend is
+  // tracked in task state (state.autoContinued): if the continuation
+  // run ALSO ends unconfirmed, the task parks in waiting_input exactly
+  // as before — hard bound, one auto-continue per task, no loop.
+  // Only the unconfirmed-end outcome is eligible: it is identified by
+  // the exact canned question (UNCONFIRMED_RUN_QUESTION). Genuine
+  // agent questions (ask_user, the document field prompt) and the
+  // missing-model message carry different question text and are never
+  // auto-continued.
+  private async autoContinueIfUnconfirmed(
+    task: AgentTask,
+    result: Partial<AgentTask>,
+    context: TaskContext,
+  ): Promise<Partial<AgentTask>> {
+    if (result.status !== "waiting_input" || result.question !== UNCONFIRMED_RUN_QUESTION)
+      return result;
+    const state = { ...task.state, ...(result.state ?? {}) };
+    if (state.autoContinued) return result;
+    await context.event(
+      "status",
+      "Auto-continue",
+      "The run ended without confirming completion, so the task was continued automatically — once — with a system instruction to finish and confirm the result. No input was needed from you.",
+    );
+    return {
+      ...result,
+      status: "queued",
+      // Clear the canned question, like answer() does when requeueing;
+      // the patch is JSON-merged, so null is the stored value.
+      question: null,
+      state: { ...state, autoContinued: true, answer: AUTO_CONTINUE_INSTRUCTION },
+    } as unknown as Partial<AgentTask>;
   }
   async finish(task: AgentTask, context: TaskContext, result: string) {
     await context.guard();
