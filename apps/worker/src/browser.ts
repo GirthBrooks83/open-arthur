@@ -37,13 +37,15 @@ export async function createBrowserManager(options: {
   dataDir: string;
   maxSessions?: number;
   idleTimeoutMs?: number;
+  allowFakeIpRange?: boolean;
 }) {
   const { dataDir, maxSessions = 3, idleTimeoutMs = 30 * 60_000 } = options;
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   const sessions = new Map<string, Session>();
   const running = new Map<string, Running>();
   const queues = new Map<string, Promise<unknown>>();
-  const proxy = await startEgressProxy();
+  const proxy = await startEgressProxy(options.allowFakeIpRange);
+  const validate = (url: string) => validatePublicUrl(url, undefined, options.allowFakeIpRange);
   for (const id of await readdir(dataDir)) {
     if (!SESSION_ID.test(id)) continue;
     try {
@@ -85,7 +87,7 @@ export async function createBrowserManager(options: {
   }
   async function refresh(id: string) {
     const instance = active(id);
-    if (instance.page.url() !== "about:blank") await validatePublicUrl(instance.page.url());
+    if (instance.page.url() !== "about:blank") await validate(instance.page.url());
     const session: Session = {
       id,
       title: (await instance.page.title()).slice(0, 300),
@@ -111,14 +113,14 @@ export async function createBrowserManager(options: {
     return list;
   }
   async function navigate(id: string, url: string) {
-    const target = await validatePublicUrl(url);
+    const target = await validate(url);
     const { page } = active(id);
     try {
       await page.goto(target.url.href, { waitUntil: "domcontentloaded", timeout: 20_000 });
       // Chromium can follow redirects outside Playwright's initial route hook.
       // The proxy blocks those sockets, but its 403 is still an HTTP response:
       // validate the final location so the API does not report it as success.
-      await validatePublicUrl(page.url());
+      await validate(page.url());
     } catch (error) {
       if (error instanceof WorkerError && error.code === "BLOCKED_URL") {
         await page.goto("about:blank", { timeout: 5000 });
@@ -150,7 +152,7 @@ export async function createBrowserManager(options: {
     return result;
   }
   async function createSession(id: string, url: string) {
-    await validatePublicUrl(url);
+    await validate(url);
     if (running.has(id)) return navigate(id, url);
     if (running.size >= maxSessions)
       throw new WorkerError(
@@ -214,7 +216,7 @@ export async function createBrowserManager(options: {
       }
       await context.route("**/*", async (route) => {
         try {
-          await validatePublicUrl(route.request().url());
+          await validate(route.request().url());
           await route.continue();
         } catch {
           await route.abort("blockedbyclient").catch(() => {});
@@ -299,7 +301,7 @@ export async function createBrowserManager(options: {
     read: (id: string) =>
       serial(id, async () => {
         const { page } = active(id);
-        await validatePublicUrl(page.url());
+        await validate(page.url());
         // Evaluation is fixed by the worker; callers cannot inject JavaScript.
         const result = await page.evaluate(() => {
           const text = document.body?.innerText ?? "";
@@ -310,7 +312,7 @@ export async function createBrowserManager(options: {
             truncated: text.length > 100_000,
           };
         });
-        await validatePublicUrl(result.url);
+        await validate(result.url);
         const session: Session = {
           id,
           url: result.url,

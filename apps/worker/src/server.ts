@@ -35,6 +35,7 @@ export async function createWorkerServer(options: {
   dataDir: string;
   maxSessions?: number;
   idleTimeoutMs?: number;
+  allowFakeIpRange?: boolean;
 }) {
   if (options.token.length < 32)
     throw new Error("WORKER_TOKEN must contain at least 32 characters.");

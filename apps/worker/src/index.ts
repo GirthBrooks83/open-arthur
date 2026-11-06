@@ -3,6 +3,7 @@ import { createWorkerServer } from "./server.ts";
 const token = process.env.WORKER_TOKEN ?? "";
 const worker = await createWorkerServer({
   token,
+  allowFakeIpRange: process.env.WORKER_ALLOW_FAKE_IP_RANGE === "true",
   dataDir: process.env.WORKER_DATA_DIR ?? ".openmuse/browser-profiles",
   maxSessions: 3,
   idleTimeoutMs: 30 * 60_000,
