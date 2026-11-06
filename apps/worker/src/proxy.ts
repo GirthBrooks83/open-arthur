@@ -4,11 +4,11 @@ import { connect, type Socket } from "node:net";
 import { validatePublicUrl } from "./network.ts";
 
 /** All upstream sockets connect to a validated IP, never a second DNS lookup. */
-export async function startEgressProxy() {
+export async function startEgressProxy(allowFakeIpRange = false) {
   const sockets = new Set<Socket>();
   const server = createServer(async (incoming, response) => {
     try {
-      const target = await validatePublicUrl(incoming.url ?? "");
+      const target = await validatePublicUrl(incoming.url ?? "", undefined, allowFakeIpRange);
       if (target.url.protocol !== "http:") throw new Error("HTTP proxy requires HTTP URL");
       const headers: OutgoingHttpHeaders = { ...incoming.headers, host: target.url.host };
       delete headers["proxy-authorization"];
@@ -49,7 +49,7 @@ export async function startEgressProxy() {
       const authority = request.url ?? "";
       if (!/^(?:\[[0-9a-f:]+\]|[a-z0-9.-]+):443$/i.test(authority))
         throw new Error("Invalid tunnel");
-      const target = await validatePublicUrl(`https://${authority}`);
+      const target = await validatePublicUrl(`https://${authority}`, undefined, allowFakeIpRange);
       if (client.destroyed) return;
       const upstream = connect({ host: target.address, port: 443, family: target.family });
       sockets.add(upstream);

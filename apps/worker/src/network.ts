@@ -5,7 +5,14 @@ import { WorkerError } from "./errors.ts";
 
 // Conservative global-unicast allowlist: transition, documentation, private,
 // loopback, multicast and reserved networks are never browser destinations.
-export function isPublicIp(address: string): boolean {
+//
+// One explicit operator opt-in exists: fake-IP sandboxed egress (TUN-style
+// sandboxes whose resolver answers every public name inside 198.18.0.0/15,
+// RFC 2544 benchmarking space, and routes those addresses through a NAT
+// fabric). There, and only there, the operator may pass allowFakeIpRange so
+// the guard accepts 198.18/19 answers. It stays off by default: on honest
+// DNS a 198.18/15 answer is a spoofing signal and remains blocked.
+export function isPublicIp(address: string, allowFakeIpRange = false): boolean {
   const family = isIP(address);
   if (family === 4) {
     const [a = 0, b = 0, c = 0] = address.split(".").map(Number);
@@ -18,7 +25,7 @@ export function isPublicIp(address: string): boolean {
       (a === 169 && b === 254) ||
       (a === 172 && b >= 16 && b <= 31) ||
       (a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2)) || (b === 88 && c === 99))) ||
-      (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
+      (a === 198 && (((b === 18 || b === 19) && !allowFakeIpRange) || (b === 51 && c === 100))) ||
       (a === 203 && b === 0 && c === 113)
     );
   }
@@ -46,6 +53,7 @@ export type Resolver = (hostname: string) => Promise<LookupAddress[]>;
 export async function validatePublicUrl(
   value: string,
   resolve: Resolver = (hostname) => lookup(hostname, { all: true, verbatim: true }),
+  allowFakeIpRange = false,
 ) {
   const blocked = () =>
     new WorkerError(
@@ -88,7 +96,10 @@ export async function validatePublicUrl(
       clearTimeout(timer);
     }
   }
-  if (addresses.length === 0 || addresses.some((entry) => !isPublicIp(entry.address)))
+  if (
+    addresses.length === 0 ||
+    addresses.some((entry) => !isPublicIp(entry.address, allowFakeIpRange))
+  )
     throw blocked();
   const selected = addresses.find((entry) => entry.family === 4) ?? addresses[0];
   if (!selected) throw blocked();

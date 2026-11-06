@@ -393,6 +393,56 @@ test("browser rejects DNS answers containing any private address and pins public
   assert.equal(result.url.href, "https://example.com/a");
 });
 
+test("fake-IP range stays blocked by default and opens only with the operator opt-in", async () => {
+  // The opt-in moves exactly one range: 198.18.0.0/15 (RFC 2544 benchmarking
+  // space, used as the fake-IP pool by TUN-style sandboxed egress).
+  for (const address of ["198.18.0.1", "198.18.255.254", "198.19.0.1", "198.19.255.255"]) {
+    assert.equal(isPublicIp(address), false, address);
+    assert.equal(isPublicIp(address, false), false, address);
+    assert.equal(isPublicIp(address, true), true, address);
+  }
+  // Every other blocked range stays blocked with the opt-in on — private,
+  // loopback, link-local, CGNAT, documentation and reserved space included.
+  for (const address of [
+    "0.0.0.1",
+    "10.0.0.1",
+    "127.0.0.1",
+    "169.254.169.254",
+    "172.16.0.1",
+    "192.168.1.1",
+    "100.64.0.1",
+    "192.0.2.1",
+    "198.51.100.2",
+    "203.0.113.1",
+    "224.0.0.1",
+  ])
+    assert.equal(isPublicIp(address, true), false, address);
+  // Public answers pass in both modes.
+  for (const address of ["8.8.8.8", "1.1.1.1"])
+    assert.equal(isPublicIp(address, true), true, address);
+
+  // URL validation mirrors the guard: a fake-IP DNS answer is rejected by
+  // default and pinned only when the operator opted in.
+  const fakeAnswer = async () => [{ address: "198.18.7.23", family: 4 }];
+  await assert.rejects(validatePublicUrl("https://news.ycombinator.com", fakeAnswer), {
+    code: "BLOCKED_URL",
+  });
+  const result = await validatePublicUrl("https://news.ycombinator.com", fakeAnswer, true);
+  assert.equal(result.address, "198.18.7.23");
+  // A private answer mixed into the response still blocks with the opt-in on.
+  await assert.rejects(
+    validatePublicUrl(
+      "https://news.ycombinator.com",
+      async () => [
+        { address: "198.18.7.23", family: 4 },
+        { address: "10.0.0.5", family: 4 },
+      ],
+      true,
+    ),
+    { code: "BLOCKED_URL" },
+  );
+});
+
 test("worker protects all controls, validates before launch, and health reveals no sessions", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "openmuse-worker-"));
   const savedId = "00000000-0000-4000-8000-000000000002";

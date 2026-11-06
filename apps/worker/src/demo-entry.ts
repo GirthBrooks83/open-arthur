@@ -3,6 +3,7 @@ import { createWorkerServer } from "./server.ts";
 // Launched only by pnpm dev:demo, with an explicit local environment and isolated profiles.
 const worker = await createWorkerServer({
   token: process.env.WORKER_TOKEN ?? "",
+  allowFakeIpRange: process.env.WORKER_ALLOW_FAKE_IP_RANGE === "true",
   dataDir: process.env.WORKER_DATA_DIR ?? "artifacts/demo/browser-profiles",
   maxSessions: 6,
   idleTimeoutMs: 30 * 60_000,
