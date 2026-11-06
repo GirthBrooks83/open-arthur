@@ -16,6 +16,7 @@ import { ComputerService, type DockerRunner } from "./computer.ts";
 import { computerRoutes } from "./computer-routes.ts";
 import type { Config } from "./config.ts";
 import type { Store } from "./db.ts";
+import { type LaneProbe, laneProbeFor } from "./engine/lane-probe.ts";
 import { buildProviderChain } from "./engine/rate-limit.ts";
 import { agentRoutes } from "./engine/routes.ts";
 import { AgentService } from "./engine/service.ts";
@@ -28,7 +29,7 @@ import { WorkspaceService } from "./workspace.ts";
 export async function createApp(
   db: Store,
   config: Config,
-  options: { docker?: DockerRunner } = {},
+  options: { docker?: DockerRunner; laneProbe?: LaneProbe } = {},
 ) {
   const auth = await createAuth(db, config),
     files = new Files(db, config, auth),
@@ -42,6 +43,10 @@ export async function createApp(
     connection: (owner) => workspace.connection(owner),
   });
   const browser = new BrowserService(db, config, auth, files);
+  // Live lane probes (engine/lane-probe.ts): background-refresh +
+  // cached snapshot, so /api/health can report which configured
+  // lanes are answering right now without ever waiting on them.
+  const laneProbe = options.laneProbe ?? laneProbeFor(config);
   const computer = new ComputerService(db, config, options.docker);
   const agent = new AgentService(db, config, workspace, files, actions, browser, computer);
   // The CopilotKit runtime costs ~100 MB RSS to import and is only needed
@@ -143,8 +148,18 @@ export async function createApp(
       502,
     );
   });
-  app.get("/api/health", (c) =>
-    c.json({
+  app.get("/api/health", (c) => {
+    // Live-probe snapshot: cached values, never awaited — a stale
+    // cache starts a background refresh and this response carries
+    // the last known values (null = not configured, or configured
+    // but not probed yet). The `integrations` block below remains
+    // configuration presence, exactly as before; `integrationsLive`
+    // and `browserLive` are the answering-right-now truth next to it.
+    // Slack stays configuration-only by design: its proof is
+    // event-driven (signed events POSTed to us), so no GET probe
+    // could establish its liveness.
+    const live = laneProbe.snapshot();
+    return c.json({
       ok: true,
       mode: config.mode,
       agentConfigured: agentConfigured(config),
@@ -199,8 +214,10 @@ export async function createApp(
         n8n: Boolean(config.integrations?.n8nUrl),
         anythingllm: Boolean(config.integrations?.anythingLlmUrl),
       },
-    }),
-  );
+      integrationsLive: live.integrationsLive,
+      browserLive: live.browserLive,
+    });
+  });
   let loginWindow = 0,
     loginAttempts = 0;
   app.post("/api/session", async (c) => {
@@ -492,5 +509,5 @@ export async function createApp(
       c.json({ name: "OpenMuse", app: "http://localhost:8081", health: "/api/health" }),
     );
   }
-  return { app, auth, files, actions, workspace, agent, computer };
+  return { app, auth, files, actions, workspace, agent, computer, laneProbe };
 }
