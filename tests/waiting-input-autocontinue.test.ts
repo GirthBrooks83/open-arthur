@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createApp } from "../apps/server/src/app.ts";
 import { createStore } from "../apps/server/src/db.ts";
-import { UNCONFIRMED_RUN_QUESTION } from "../apps/server/src/engine/model.ts";
-import { AUTO_CONTINUE_INSTRUCTION } from "../apps/server/src/engine/service.ts";
+import {
+  AUTO_CONTINUE_INSTRUCTION,
+  UNCONFIRMED_RUN_FAILURE,
+} from "../apps/server/src/engine/service.ts";
 import { fixture as computerFixture } from "./helpers/computer.ts";
 import { modelFixture } from "./helpers/model.ts";
 
@@ -17,9 +19,9 @@ import { modelFixture } from "./helpers/model.ts";
 // FIRST unconfirmed end for a task automatically issues ONE follow-up
 // run carrying a system instruction to confirm/complete (recorded as
 // an "Auto-continue" run event, spend tracked as state.autoContinued).
-// A second unconfirmed end parks in waiting_input exactly as before —
-// hard bound of one auto-continue per task. Genuine agent questions
-// (ask_user) are never auto-continued.
+// A second unconfirmed end fails the task honestly with the reason on
+// the record — never parked forever. Hard bound of one auto-continue
+// per task. Genuine agent questions (ask_user) are never auto-continued.
 
 async function startFixtureTask(
   t: Parameters<typeof modelFixture>[0],
@@ -104,7 +106,7 @@ test("an unconfirmed end issues exactly one auto-continue run, which can then su
   }
 });
 
-test("a second unconfirmed end parks in waiting_input with no third run", async (t) => {
+test("a second unconfirmed end fails the task honestly, with no third run", async (t) => {
   const run = await startFixtureTask(
     t,
     () => ({ text: "Still thinking out loud." }),
@@ -115,14 +117,21 @@ test("a second unconfirmed end parks in waiting_input with no third run", async 
     assert.equal((await run.getTask()).status, "queued");
     await run.tick();
     const detail = await run.detail();
-    assert.equal(detail.task.status, "waiting_input");
-    assert.equal(detail.task.question, UNCONFIRMED_RUN_QUESTION);
+    assert.equal(detail.task.status, "failed", "the task is failed, not parked forever");
+    assert.equal(detail.task.error, UNCONFIRMED_RUN_FAILURE);
+    assert.equal(detail.task.question, null, "the canned question is cleared");
     assert.equal(detail.task.state.autoContinued, true);
     assert.equal(autoContinueEvents(detail).length, 1);
+    assert.ok(
+      detail.events.some(
+        (event) => event.kind === "error" && event.title === "Task needs attention",
+      ),
+      "an error event records the honest failure",
+    );
     assert.equal(run.fixture.requests.length, 2, "two runs total: original + one auto-continue");
 
     await run.tick();
-    assert.equal((await run.getTask()).status, "waiting_input");
+    assert.equal((await run.getTask()).status, "failed");
     assert.equal(run.fixture.requests.length, 2, "no third run is ever issued");
   } finally {
     await run.done();

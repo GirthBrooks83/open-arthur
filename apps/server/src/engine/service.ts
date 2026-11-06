@@ -47,6 +47,13 @@ import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
 export const AUTO_CONTINUE_INSTRUCTION =
   "Automatic follow-up from the system: your previous run ended without confirming completion. Continue this task now and finish it — complete the remaining work, then call finish_task with the result. Call ask_user only if you genuinely need a fact or decision from the user. Do not end this run without calling finish_task or ask_user.";
 
+// The honest terminal error when the auto-continue run ALSO ends
+// unconfirmed: the task is failed with this reason on the record
+// (and the standard failure notification) instead of being parked
+// in waiting_input forever. See autoContinueIfUnconfirmed.
+export const UNCONFIRMED_RUN_FAILURE =
+  "The agent's run ended without confirming completion, and the automatic follow-up run ended the same way — so this task was stopped instead of being left waiting. Start a new task to try again.";
+
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const date = () => new Date().toISOString();
 const terminal = new Set(["succeeded", "failed", "cancelled"]);
@@ -841,8 +848,9 @@ export class AgentService {
   // (the channel a user's reply uses) and record the continuation as a
   // run event, so it is visible in the task's event log. The spend is
   // tracked in task state (state.autoContinued): if the continuation
-  // run ALSO ends unconfirmed, the task parks in waiting_input exactly
-  // as before — hard bound, one auto-continue per task, no loop.
+  // run ALSO ends unconfirmed, the task is failed honestly with
+  // UNCONFIRMED_RUN_FAILURE on the record — never parked forever.
+  // Hard bound: one auto-continue per task, no loop.
   // Only the unconfirmed-end outcome is eligible: it is identified by
   // the exact canned question (UNCONFIRMED_RUN_QUESTION). Genuine
   // agent questions (ask_user, the document field prompt) and the
@@ -856,7 +864,18 @@ export class AgentService {
     if (result.status !== "waiting_input" || result.question !== UNCONFIRMED_RUN_QUESTION)
       return result;
     const state = { ...task.state, ...(result.state ?? {}) };
-    if (state.autoContinued) return result;
+    if (state.autoContinued) {
+      await context.event("error", "Task needs attention", UNCONFIRMED_RUN_FAILURE);
+      return {
+        ...result,
+        status: "failed",
+        // Clear the canned question, like the requeue above does;
+        // the patch is JSON-merged, so null is the stored value.
+        question: null,
+        error: UNCONFIRMED_RUN_FAILURE,
+        state,
+      } as unknown as Partial<AgentTask>;
+    }
     await context.event(
       "status",
       "Auto-continue",
