@@ -180,14 +180,16 @@ export async function createApp(
       integrations: {
         omniroute: Boolean(config.integrations?.omnirouteUrl),
         mem0: Boolean(config.integrations?.mem0Url),
-        // Mem0 and Graphiti are the lanes with real adapters
-        // (engine/mem0.ts, engine/graphiti.ts): saves mirror to them
-        // and task recall merges their facts. The other lanes below
-        // remain configuration-only for now.
+        // Mem0, Graphiti and Hindsight are the lanes with real
+        // adapters (engine/mem0.ts, engine/graphiti.ts,
+        // engine/hindsight.ts): saves mirror to them and task recall
+        // merges their facts. The other lanes below remain
+        // configuration-only for now.
         mem0Wired: Boolean(config.integrations?.mem0Url),
         graphiti: Boolean(config.integrations?.graphitiUrl),
         graphitiWired: Boolean(config.integrations?.graphitiUrl),
         hindsight: Boolean(config.integrations?.hindsightUrl),
+        hindsightWired: Boolean(config.integrations?.hindsightUrl),
         n8n: Boolean(config.integrations?.n8nUrl),
         anythingllm: Boolean(config.integrations?.anythingLlmUrl),
       },
