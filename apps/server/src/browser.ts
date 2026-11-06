@@ -21,6 +21,11 @@ const readSchema = z.object({
   text: z.string().max(100_000),
   truncated: z.boolean(),
 });
+const extractSchema = z.object({
+  url: z.string(),
+  title: z.string().max(300),
+  data: z.record(z.string(), z.unknown()),
+});
 const failureSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -47,7 +52,7 @@ export class BrowserService {
       if (this.queues.get(id) === next) this.queues.delete(id);
     }
   }
-  private async request(path: string, body?: unknown, signal?: AbortSignal) {
+  private async request(path: string, body?: unknown, signal?: AbortSignal, timeoutMs = 45_000) {
     signal?.throwIfAborted();
     if (!this.config.workerUrl || !this.config.workerToken)
       throw new AppError("Browser worker is not configured. Start it using the setup guide.", 503);
@@ -61,8 +66,8 @@ export class BrowserService {
         },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: signal
-          ? AbortSignal.any([signal, AbortSignal.timeout(45000)])
-          : AbortSignal.timeout(45000),
+          ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+          : AbortSignal.timeout(timeoutMs),
       });
     } catch {
       signal?.throwIfAborted();
@@ -195,6 +200,19 @@ export class BrowserService {
         truncated: page.truncated || page.text.length > 30_000,
       };
     });
+  }
+  // Agent browser (Stagehand) extraction: stateless — the worker opens
+  // the page, extracts with its local model, and returns structured
+  // data. No session is created and nothing is stored server-side; the
+  // caller (the extract_web tool) records the result as evidence.
+  async extract(url: string, instruction: string, fields?: string[], signal?: AbortSignal) {
+    const response = await this.request(
+      "/extract",
+      { url, instruction, ...(fields && fields.length > 0 ? { fields } : {}) },
+      signal,
+      180_000,
+    );
+    return extractSchema.parse(await response.json());
   }
   async close(owner: string, id: string) {
     return this.serial(id, async () => {

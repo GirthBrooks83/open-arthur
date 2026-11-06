@@ -54,7 +54,7 @@ exists.
 
 | Item | Why it lives here | Lab status (2026-11-04) |
 | --- | --- | --- |
-| Stagehand | Browser-automation SDK for the browser worker, not the API server. | Ready — live extract proven against a local model; observe/act need a larger local model than 1B. |
+| Stagehand | Browser-automation SDK for the browser worker, not the API server. | **Wired in the worker** — `POST /extract` (Stagehand 4.3.0 + local Ollama model) behind `WORKER_STAGEHAND_ENABLED`, exposed to the agent as the `extract_web` tool behind `AGENT_BROWSER_ENABLED`; the worker's SSRF guard and egress proxy cover its navigation. Extraction only: observe/act remain unexposed (unproven against the 1B local model). |
 | Goose | Standalone agent binary (operator-side). | Ready — goose 1.22.1 runs; capability ceiling is the weak local 1B model. |
 | Super Productivity | The operator's task board (GUI app). | Ready — AppImage v19.3.1 in daily use as the queue board; no headless surface exists to wire. |
 | Phonon (xn-ptts) | On-device TTS for the voice lane (Phase 3). | Works — real speech synthesized in the lab; live voice-note wiring awaits the owner's go and a venv repair. |

@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage } from "node:http";
 import { createBrowserManager, validateSessionId } from "./browser.ts";
 import { WorkerError } from "./errors.ts";
+import type { StagehandModule } from "./stagehand.ts";
 
 async function readBody(request: IncomingMessage): Promise<Record<string, unknown>> {
   if (!request.headers["content-type"]?.startsWith("application/json"))
@@ -36,6 +37,12 @@ export async function createWorkerServer(options: {
   maxSessions?: number;
   idleTimeoutMs?: number;
   allowFakeIpRange?: boolean;
+  stagehand?: {
+    ollamaUrl: string;
+    model: string;
+    chromiumPath?: string;
+    loadModule?: () => Promise<StagehandModule>;
+  };
 }) {
   if (options.token.length < 32)
     throw new Error("WORKER_TOKEN must contain at least 32 characters.");
@@ -66,6 +73,36 @@ export async function createWorkerServer(options: {
       if (pathname === "/sessions" && request.method === "POST") {
         const body = await readBody(request);
         json(201, await browser.create(validateSessionId(body.id), requiredUrl(body)));
+        return;
+      }
+      if (pathname === "/extract" && request.method === "POST") {
+        // Extraction runs a local model against a live page and can
+        // take far longer than a session call; give the socket room.
+        request.socket.setTimeout(185_000);
+        const body = await readBody(request);
+        const url = requiredUrl(body);
+        const instruction = typeof body.instruction === "string" ? body.instruction.trim() : "";
+        if (!instruction || instruction.length > 2000)
+          throw new WorkerError(
+            "INVALID_INSTRUCTION",
+            "An instruction of 1–2000 characters is required.",
+          );
+        let fields: string[] | undefined;
+        if (body.fields !== undefined) {
+          if (
+            !Array.isArray(body.fields) ||
+            body.fields.length > 12 ||
+            body.fields.some(
+              (field) => typeof field !== "string" || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(field),
+            )
+          )
+            throw new WorkerError(
+              "INVALID_FIELDS",
+              "fields must be up to 12 field names (letters, digits, underscore).",
+            );
+          fields = [...new Set(body.fields as string[])];
+        }
+        json(200, await browser.extract(url, instruction, fields));
         return;
       }
       const match =
@@ -114,7 +151,10 @@ export async function createWorkerServer(options: {
       else response.end();
     }
   });
-  server.requestTimeout = 30_000;
+  // Extraction (Stagehand + local model) legitimately runs longer
+  // than a session call; only an operator who enabled it gets the
+  // longer request budget.
+  server.requestTimeout = options.stagehand ? 200_000 : 30_000;
   server.headersTimeout = 10_000;
   server.keepAliveTimeout = 5_000;
   server.maxRequestsPerSocket = 100;
