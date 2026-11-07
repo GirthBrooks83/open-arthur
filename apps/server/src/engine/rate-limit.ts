@@ -31,6 +31,28 @@ export function isQuotaExhausted(delayMs: number | null, attemptsUsed: number): 
 }
 
 /**
+ * Run-wide budget of short-window rate-limit waits, shared across every
+ * provider in the chain. The per-provider budget above decides when ONE
+ * provider is done; this cap stops a run from restarting that budget at
+ * every failover — with a three-provider chain the run could otherwise
+ * burn nine attempts and six long sleeps inside a single task, most of
+ * them against a failover provider that is just as quota-dead as the one
+ * before it. Once the run's waits are spent, any further rate-limit
+ * failure ends that provider for the run and fails over (or ends the
+ * run when no provider is left).
+ */
+export const MAX_RUN_RATE_LIMIT_WAITS = 2;
+
+export function isProviderDoneForRun(
+  delayMs: number | null,
+  attemptsUsed: number,
+  runWaitsUsed: number,
+): boolean {
+  if (isQuotaExhausted(delayMs, attemptsUsed)) return true;
+  return delayMs !== null && runWaitsUsed >= MAX_RUN_RATE_LIMIT_WAITS;
+}
+
+/**
  * The ordered provider chain for a run: the configured models in order
  * (primary, fallback, second fallback), minus blanks, duplicates, and any
  * model whose provider key is not present. The first entry is the active
