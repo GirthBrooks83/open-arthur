@@ -10,7 +10,7 @@ import { computerInstructions, computerTools } from "../computer-tools.ts";
 import {
   allProvidersExhaustedMessage,
   buildProviderChain,
-  isQuotaExhausted,
+  isProviderDoneForRun,
   type ProviderFailure,
   rateLimitDelayMs,
 } from "./rate-limit.ts";
@@ -428,6 +428,10 @@ export async function executeModelTask(
   // confirmed outcome, to store the cut text it did produce.
   let chunkText = "";
   const failures: ProviderFailure[] = [];
+  // Short-window rate-limit waits spent by this run, across ALL
+  // providers: failover must not hand a quota-dead provider a fresh
+  // retry budget (see MAX_RUN_RATE_LIMIT_WAITS in rate-limit.ts).
+  let runWaitsUsed = 0;
   for (let attempt = 0; ; attempt++) {
     text = "";
     truncated = false;
@@ -496,7 +500,7 @@ export async function executeModelTask(
     // task's events — and continue there. Only when every provider is
     // exhausted does the run fail, with a plain-language summary and the
     // earliest suggested reset instead of a raw provider error.
-    if (isQuotaExhausted(delay, attempt)) {
+    if (isProviderDoneForRun(delay, attempt, runWaitsUsed)) {
       failures.push({ model: activeModel, message: failure, delayMs: delay });
       if (chainIndex + 1 < chain.length) {
         const from = activeModel;
@@ -515,6 +519,7 @@ export async function executeModelTask(
       }
       throw new Error(allProvidersExhaustedMessage(failures));
     }
+    runWaitsUsed += 1;
     await waitForRetry(delay + 2000);
   }
   // A capped final call must not pass as a complete answer. Mark the

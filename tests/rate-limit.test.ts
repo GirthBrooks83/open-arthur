@@ -4,7 +4,9 @@ import {
   allProvidersExhaustedMessage,
   buildProviderChain,
   DEFAULT_RATE_LIMIT_WAIT_MS,
+  isProviderDoneForRun,
   isQuotaExhausted,
+  MAX_RUN_RATE_LIMIT_WAITS,
   rateLimitDelayMs,
 } from "../apps/server/src/engine/rate-limit.ts";
 
@@ -57,6 +59,23 @@ test("failover decision: the real Gemini daily-cap error fails over immediately"
   assert.equal(isQuotaExhausted(delay, 0), true);
   // ...while the per-minute shape is waited out on the same provider first.
   assert.equal(isQuotaExhausted(rateLimitDelayMs(GEMINI_PER_MINUTE), 0), false);
+});
+
+test("run budget: failover does not hand a quota-dead provider a fresh wait budget", () => {
+  const perMinute = rateLimitDelayMs(GEMINI_PER_MINUTE);
+  // Early in the run a short window is still worth waiting out, on the
+  // first provider or after a failover that spent nothing.
+  assert.equal(isProviderDoneForRun(perMinute, 0, 0), false);
+  assert.equal(isProviderDoneForRun(perMinute, 0, MAX_RUN_RATE_LIMIT_WAITS - 1), false);
+  // Once the run's waits are spent, the SAME short-window failure ends
+  // the failover provider immediately instead of burning another budget.
+  assert.equal(isProviderDoneForRun(perMinute, 0, MAX_RUN_RATE_LIMIT_WAITS), true);
+  // Per-provider verdicts are unchanged: long windows end a provider at
+  // once, renewed short windows end it at the per-provider budget.
+  assert.equal(isProviderDoneForRun(rateLimitDelayMs(GEMINI_DAILY_CAP), 0, 0), true);
+  assert.equal(isProviderDoneForRun(perMinute, 2, 0), true);
+  // A non-rate-limit failure never ends a provider through this rule.
+  assert.equal(isProviderDoneForRun(null, 0, MAX_RUN_RATE_LIMIT_WAITS), false);
 });
 
 test("parses the Groq 'try again in' window as a short wait, not exhaustion", () => {
