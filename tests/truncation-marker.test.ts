@@ -80,11 +80,16 @@ const CUT_SUMMARY =
 test("a capped finish marks the stored result and records the truncation", async (t) => {
   const detail = await runFixtureTask(
     t,
+    // A read_workspace tool result grounds the completion for the
+    // Critic gate (verifier spine); finish_task alone never grounds
+    // its own claim.
     (index) =>
       index === 0
-        ? { name: "finish_task", arguments: { summary: CUT_SUMMARY } }
-        : // The run's final model call stops on the output-token cap.
-          { text: "Here are the tips.", incomplete: true },
+        ? { name: "read_workspace", arguments: { section: "files" } }
+        : index === 1
+          ? { name: "finish_task", arguments: { summary: CUT_SUMMARY } }
+          : // The run's final model call stops on the output-token cap.
+            { text: "Here are the tips.", incomplete: true },
     "List 10 practical tips for keeping a houseplant alive indoors",
   );
   assert.equal(detail.task.status, "succeeded", detail.task.error ?? detail.task.question);
@@ -125,7 +130,12 @@ test("a normal finish stores the result with no marker and no truncation record"
   const summary = "All ten tips, complete and checked.";
   const detail = await runFixtureTask(
     t,
-    (index) => (index === 0 ? { name: "finish_task", arguments: { summary } } : { text: "Done." }),
+    (index) =>
+      index === 0
+        ? { name: "read_workspace", arguments: { section: "files" } }
+        : index === 1
+          ? { name: "finish_task", arguments: { summary } }
+          : { text: "Done." },
     "List 10 practical tips for keeping a houseplant alive indoors",
   );
   assert.equal(detail.task.status, "succeeded", detail.task.error ?? detail.task.question);

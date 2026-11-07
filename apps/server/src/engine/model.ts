@@ -73,6 +73,21 @@ export async function executeModelTask(
     task.state.operations && typeof task.state.operations === "object"
       ? (task.state.operations as Record<string, unknown>)
       : {};
+  // Successful tool results in this run, for the Critic gate in
+  // engine/service.ts (a completion is grounded by >=1 evidence match
+  // OR >=1 successful tool result). The completion/pausing tools never
+  // ground their own outcome: finish_task is the claim being checked,
+  // ask_user and the prepare_* tools end the run without a result, and
+  // set_plan is planning, not evidence. Names only — no tool payloads
+  // are stored here.
+  const successfulTools = new Set<string>();
+  const nonGroundingTools = new Set([
+    "finish_task",
+    "ask_user",
+    "prepare_email",
+    "prepare_event",
+    "set_plan",
+  ]);
   const checkpoint = async () => {
     task = await ctx.checkpoint({ state: { ...task.state, operations } });
   };
@@ -108,7 +123,18 @@ export async function executeModelTask(
           await ctx.guard();
           await ctx.event("step", description);
           try {
-            return await execute(parameters.parse(args));
+            const value = await execute(parameters.parse(args));
+            if (
+              !nonGroundingTools.has(name) &&
+              !(
+                value !== null &&
+                typeof value === "object" &&
+                "error" in value &&
+                typeof (value as { error: unknown }).error === "string"
+              )
+            )
+              successfulTools.add(name);
+            return value;
           } catch (error) {
             const message = error instanceof Error ? error.message : "Tool failed";
             await ctx.event("error", `${name} failed`, message);
@@ -552,11 +578,26 @@ export async function executeModelTask(
     );
   }
   if (text) await ctx.event("step", "Agent update", text.slice(0, 12000));
+  // Hand the run's successful-tool record to the service's Critic
+  // gate on the outcome's state (merged over the task's current
+  // state, like the truncation marker above, so no checkpointed
+  // state is lost).
+  const toolResults = [...successfulTools];
+  if (outcome && toolResults.length)
+    outcome = {
+      ...outcome,
+      state: { ...task.state, ...(outcome.state ?? {}), toolResults },
+    };
   return (
     outcome ?? {
       status: "waiting_input",
       question: UNCONFIRMED_RUN_QUESTION,
-      state: { ...task.state, lastUpdate: text, ...(truncated && text ? { truncated: true } : {}) },
+      state: {
+        ...task.state,
+        lastUpdate: text,
+        ...(truncated && text ? { truncated: true } : {}),
+        ...(toolResults.length ? { toolResults } : {}),
+      },
     }
   );
 }

@@ -45,6 +45,21 @@ export interface AgentTask {
   error?: string | null;
   question?: string;
   artifactIds: string[];
+  // Verifier-spine stage outcomes for the latest model run, when the
+  // run went through the pipeline gates (engine/verifier.ts).
+  stageTrace?: StageTraceEntry[];
+}
+// One verifier-spine stage outcome on a task record (planner,
+// researcher, critic, writer, verifier). Summaries and metrics
+// describe workflow operations and counts only, never model
+// reasoning. The zod contract lives in the server's engine/verifier
+// module; this is its stored shape.
+export interface StageTraceEntry {
+  sequence: number;
+  agent: "planner" | "researcher" | "critic" | "writer" | "verifier";
+  outcome: "completed" | "blocked";
+  summary: string;
+  metrics: Record<string, boolean | number>;
 }
 export interface RunEvent {
   id: string;

@@ -37,7 +37,23 @@ import { type GraphitiLane, graphitiLaneFor } from "./graphiti.ts";
 import { type HindsightLane, hindsightLaneFor } from "./hindsight.ts";
 import { type Mem0Lane, mem0LaneFor } from "./mem0.ts";
 import { executeModelTask, UNCONFIRMED_RUN_QUESTION } from "./model.ts";
+import {
+  citedIds,
+  createPlan,
+  critiqueAnswer,
+  type EvidenceBundle,
+  INSUFFICIENT_EVIDENCE,
+  type StageTrace,
+  survivingMatches,
+  VERIFICATION_FAILED,
+  verifyCompletionCitations,
+} from "./verifier.ts";
 import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
+
+// Tools whose success makes a completion a WRITE task for the
+// Verifier stage: the run saved or changed something durable, so its
+// completion is checked before it ships (see applyVerifierSpine).
+const MUTATING_TOOLS = new Set(["save_memory", "save_artifact", "fill_pdf"]);
 
 // Bounded auto-continue (ATLAS audit 2026-11-06, Priority 1): the
 // follow-up instruction the service itself issues — through the same
@@ -838,7 +854,228 @@ export class AgentService {
       return this.finish(task, context, artifact.summary);
     }
     const result = await executeModelTask(this, owner, task, context);
-    return this.autoContinueIfUnconfirmed(task, result, context);
+    const continued = await this.autoContinueIfUnconfirmed(task, result, context);
+    return this.applyVerifierSpine(owner, task, result, continued, context);
+  }
+  // Verifier spine (Design Note A): every model run leaves a
+  // StageTrace on the task record, and a SUCCEEDED run passes two
+  // gates before its completion is finalized.
+  // - Critic: grounded = >=1 surviving evidence match from the recall
+  //   path (internal store -> Mem0 -> Graphiti -> Hindsight, the
+  //   recallMemories merge order, filtered by the 0.75 coverage
+  //   threshold) or from the task's own evidence, OR >=1 successful
+  //   tool result in the run. Not grounded: the completion is NOT
+  //   shipped — the task parks paused ("blocked") with the fixed
+  //   insufficient-evidence refusal as its result, resumable by the
+  //   user like any paused task.
+  // - Verifier (write tasks only — a mutating tool succeeded): the
+  //   completion must be non-empty, every citation it makes must name
+  //   a source from the EvidenceBundle, and every save_memory write
+  //   is read back exactly once and compared with what the tool
+  //   reported (the PR #22 proof pattern as a standing check). On
+  //   failure the completion is replaced with the verification-failed
+  //   status and the task fails — never silently shipped.
+  // An unconfirmed run (no finish_task / ask_user) is a failed
+  // Critique: the bounded auto-continue above owns its outcome
+  // (requeue once, then honest failure) and this method only records
+  // the blocked critic stage on its trace — it does not re-decide it.
+  private async applyVerifierSpine(
+    owner: string,
+    task: AgentTask,
+    runResult: Partial<AgentTask>,
+    continued: Partial<AgentTask>,
+    context: TaskContext,
+  ): Promise<Partial<AgentTask>> {
+    const unconfirmed =
+      runResult.status === "waiting_input" && runResult.question === UNCONFIRMED_RUN_QUESTION;
+    if (!unconfirmed && continued.status !== "succeeded") return continued;
+    const fresh = (await this.db.get<AgentTask>(owner, "tasks", task.id)) ?? task;
+    const plan = createPlan(task.prompt);
+    const memories = await this.recallMemories(owner, task.prompt);
+    const recallMatches = survivingMatches(
+      task.prompt,
+      memories.map((memory) => ({ id: memory.id, source: memory.source, text: memory.text })),
+    );
+    const seen = new Set<string>();
+    const matches: EvidenceBundle["matches"] = [];
+    for (const match of [
+      ...recallMatches,
+      ...fresh.evidence.map((evidence) => ({
+        id: evidence.id,
+        source: evidence.title,
+        excerpt: evidence.excerpt,
+        score: 1,
+      })),
+    ]) {
+      if (seen.has(match.id)) continue;
+      seen.add(match.id);
+      matches.push(match);
+    }
+    const bundle: EvidenceBundle = { matches };
+    const stateOf = (value: Partial<AgentTask>) =>
+      value.state && typeof value.state === "object" ? value.state : {};
+    const toolResults = [
+      ...new Set([
+        ...((stateOf(runResult).toolResults as string[] | undefined) ?? []),
+        ...((fresh.state.toolResults as string[] | undefined) ?? []),
+      ]),
+    ];
+    // A run resumed from an approved action carries that action's
+    // result in state — a successful result in the run, for grounding.
+    const successfulToolResults = toolResults.length + (fresh.state.approvalResult ? 1 : 0);
+    const critique = critiqueAnswer(task.prompt, bundle, successfulToolResults);
+    const documentCount = new Set(bundle.matches.map((match) => match.source)).size;
+    const trace: StageTrace[] = [
+      {
+        sequence: 1,
+        agent: "planner",
+        outcome: "completed",
+        summary: "Created an evidence-first execution plan.",
+        metrics: { task_count: plan.tasks.length, query_term_count: plan.queryTermCount },
+      },
+      {
+        sequence: 2,
+        agent: "researcher",
+        outcome: "completed",
+        summary: "Collected evidence from the recall path and the task record.",
+        metrics: { evidence_count: bundle.matches.length, document_count: documentCount },
+      },
+      {
+        sequence: 3,
+        agent: "critic",
+        outcome: !unconfirmed && critique.grounded ? "completed" : "blocked",
+        summary: unconfirmed
+          ? "Blocked the run because it ended without confirming completion."
+          : critique.grounded
+            ? "Approved the evidence for grounded completion."
+            : "Blocked unsupported completion because no matching evidence was found.",
+        metrics: {
+          approved: !unconfirmed && critique.grounded,
+          query_coverage: critique.queryCoverage,
+          tool_result_count: successfulToolResults,
+          ...(unconfirmed ? { unconfirmed: true } : {}),
+        },
+      },
+    ];
+    if (unconfirmed) {
+      trace.push({
+        sequence: 4,
+        agent: "writer",
+        outcome: "blocked",
+        summary: "No confirmed answer was produced.",
+        metrics: { answer_chars: 0, citation_count: 0 },
+      });
+      return { ...continued, stageTrace: trace };
+    }
+    const answer = typeof continued.result === "string" ? continued.result : "";
+    trace.push({
+      sequence: 4,
+      agent: "writer",
+      outcome: "completed",
+      summary: critique.grounded
+        ? "Produced the completion from approved evidence."
+        : "Returned the insufficient-evidence response.",
+      metrics: { answer_chars: answer.length, citation_count: citedIds(answer).length },
+    });
+    const mergedState = { ...fresh.state, ...stateOf(continued) };
+    if (!critique.grounded) {
+      await context.event("error", "Insufficient evidence", INSUFFICIENT_EVIDENCE);
+      return {
+        ...continued,
+        status: "paused",
+        result: INSUFFICIENT_EVIDENCE,
+        error: INSUFFICIENT_EVIDENCE,
+        question: null,
+        plan: fresh.plan,
+        stageTrace: trace,
+        state: {
+          ...mergedState,
+          criticBlocked: true,
+          notice: {
+            title: "Task blocked — insufficient evidence",
+            body: INSUFFICIENT_EVIDENCE,
+            key: `critic-blocked:${task.id}:${task.attempts}`,
+          },
+        },
+      } as unknown as Partial<AgentTask>;
+    }
+    const isWrite = toolResults.some((name) => MUTATING_TOOLS.has(name));
+    if (isWrite) {
+      // The Verifier's bundle also names the run's tool-result ids, so
+      // a citation to a saved memory or artifact is a known source.
+      const operations =
+        fresh.state.operations && typeof fresh.state.operations === "object"
+          ? (fresh.state.operations as Record<string, unknown>)
+          : {};
+      const savedMemories = Object.values(operations).filter(
+        (value): value is { saved: true; id: string; text: string } =>
+          value !== null &&
+          typeof value === "object" &&
+          (value as { saved?: unknown }).saved === true &&
+          typeof (value as { id?: unknown }).id === "string" &&
+          typeof (value as { text?: unknown }).text === "string",
+      );
+      const verifierBundle: EvidenceBundle = {
+        matches: [
+          ...bundle.matches,
+          ...savedMemories.map((memory) => ({
+            id: memory.id,
+            source: "save_memory tool result",
+            excerpt: memory.text,
+            score: 1,
+          })),
+          ...fresh.artifactIds.map((id) => ({
+            id,
+            source: "task artifact",
+            excerpt: "",
+            score: 1,
+          })),
+        ].filter((match, index, all) => all.findIndex((other) => other.id === match.id) === index),
+      };
+      const verification = verifyCompletionCitations(verifierBundle, {
+        content: answer,
+        citationCount: citedIds(answer).length,
+      });
+      // save_memory read-back, exactly once: one read of the memory
+      // store, every reported save compared against the stored text.
+      let readBackVerified = true;
+      if (toolResults.includes("save_memory")) {
+        const stored = await this.db.list<AgentMemory>(owner, "memories");
+        readBackVerified = savedMemories.every((memory) =>
+          stored.some((entry) => entry.id === memory.id && entry.text === memory.text),
+        );
+      }
+      const approved = verification.approved && readBackVerified;
+      trace.push({
+        sequence: 5,
+        agent: "verifier",
+        outcome: approved ? "completed" : "blocked",
+        summary: approved
+          ? "Verified the write task's completion invariants."
+          : "Blocked the completion because verification invariants failed.",
+        metrics: {
+          approved,
+          citation_paths_valid: verification.citationPathsValid,
+          expected_citation_count: verification.expectedCitationCount,
+          reported_citation_count: verification.reportedCitationCount,
+          ...(toolResults.includes("save_memory") ? { read_back_verified: readBackVerified } : {}),
+        },
+      });
+      if (!approved) {
+        await context.event("error", "Verification failed", VERIFICATION_FAILED);
+        return {
+          ...continued,
+          status: "failed",
+          result: VERIFICATION_FAILED,
+          error: VERIFICATION_FAILED,
+          question: null,
+          plan: fresh.plan,
+          stageTrace: trace,
+          state: { ...mergedState, verificationFailed: true },
+        } as unknown as Partial<AgentTask>;
+      }
+    }
+    return { ...continued, stageTrace: trace };
   }
   // A model run that ends unconfirmed used to park the task in
   // waiting_input indefinitely — no answer, no failure, a silent stall
