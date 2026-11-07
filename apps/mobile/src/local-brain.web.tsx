@@ -60,6 +60,12 @@ export function LocalBrainChat() {
   const frame = useRef<HTMLIFrameElement | null>(null);
   const generation = useRef<string | null>(null);
   const list = useRef<ScrollView>(null);
+  // Follow the newest message only while the user is already at the end
+  // of the list (the cloud chat's pattern). Without this guard every
+  // content-size change — each streamed token grows the reply — yanked
+  // the list back to the bottom and the user could not scroll up to
+  // read earlier messages.
+  const followLatest = useRef(true);
   const stateRef = useRef(state);
   stateRef.current = state;
 
@@ -146,6 +152,7 @@ export function LocalBrainChat() {
   function send() {
     const text = draft.trim();
     if (!text || !canChatLocally(state) || generation.current) return;
+    followLatest.current = true;
     const userMessage: LocalMessage = {
       id: `local-user-${Date.now()}`,
       role: "user",
@@ -257,9 +264,17 @@ export function LocalBrainChat() {
 
       <ScrollView
         ref={list}
+        style={{ flex: 1 }}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ gap: 13, paddingBottom: 16, flexGrow: 1 }}
-        onContentSizeChange={() => list.current?.scrollToEnd({ animated: false })}
+        onScroll={({ nativeEvent: { contentOffset, contentSize, layoutMeasurement } }) => {
+          followLatest.current =
+            contentSize.height - contentOffset.y - layoutMeasurement.height < 100;
+        }}
+        scrollEventThrottle={100}
+        onContentSizeChange={() => {
+          if (followLatest.current) list.current?.scrollToEnd({ animated: false });
+        }}
         keyboardShouldPersistTaps="handled"
       >
         {!messages.length ? (

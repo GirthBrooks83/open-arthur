@@ -300,6 +300,7 @@ export function Sheet({
             <IconButton icon={X} label="Close details" onPress={onClose} />
           </View>
           <ScrollView
+            style={{ flex: 1 }}
             keyboardShouldPersistTaps="handled"
             contentContainerStyle={{ padding: compact ? 20 : 24 }}
           >
