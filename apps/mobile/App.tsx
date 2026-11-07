@@ -365,6 +365,7 @@ function WorkspaceShell({
             {section !== "chat" && (
               <ScrollView
                 key={section}
+                style={{ flex: 1 }}
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={{ paddingHorizontal: desktop ? 42 : 22, paddingBottom: 28 }}
                 keyboardShouldPersistTaps="handled"

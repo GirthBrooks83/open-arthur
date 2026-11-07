@@ -395,6 +395,7 @@ export function ChatScreen({
       {brainToggle}
       <ScrollView
         ref={list}
+        style={{ flex: 1 }}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ gap: 13, paddingTop: 15, paddingBottom: 20, flexGrow: 1 }}
         onScroll={({ nativeEvent: { contentOffset, contentSize, layoutMeasurement } }) => {
