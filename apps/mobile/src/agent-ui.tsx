@@ -1583,7 +1583,10 @@ function MonitorCard({ monitor, onOpenTask }: { monitor: Monitor; onOpenTask?: (
         {monitor.status === "active" ? `\nNext check: ${stamp(monitor.nextCheckAt)}` : ""}
       </Text>
       {monitor.lastValue && (
-        <Text selectable numberOfLines={5} style={s.muted}>
+        // This card renders only inside the monitor detail sheet, whose
+        // list scrolls — capping the value at 5 lines here left the rest
+        // of the latest reading unreachable anywhere in the app.
+        <Text selectable style={s.muted}>
           {monitor.lastValue}
         </Text>
       )}
