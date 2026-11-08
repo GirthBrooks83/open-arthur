@@ -73,8 +73,12 @@ test("an unconfirmed end issues exactly one auto-continue run, which can then su
           // confirms completion — the audit's stall.
           { text: "I am the fixture model." }
         : index === 1
-          ? { name: "finish_task", arguments: { summary: "I am the fixture model." } }
-          : { text: "Done." },
+          ? // Continuation run: a real tool result grounds the
+            // completion for the Critic gate (verifier spine).
+            { name: "read_workspace", arguments: { section: "files" } }
+          : index === 2
+            ? { name: "finish_task", arguments: { summary: "I am the fixture model." } }
+            : { text: "Done." },
     "What model are you?",
   );
   try {
@@ -91,8 +95,8 @@ test("an unconfirmed end issues exactly one auto-continue run, which can then su
     assert.equal(detail.task.state.autoContinued, true);
     assert.equal(
       run.fixture.requests.length,
-      3,
-      "exactly one continuation run was issued (its finish_task call + closing call)",
+      4,
+      "exactly one continuation run was issued (its tool call + finish_task call + closing call)",
     );
     assert.ok(
       run.fixture.requests[1]?.body.includes(AUTO_CONTINUE_INSTRUCTION),
@@ -142,7 +146,15 @@ test("a confirmed completion never auto-continues", async (t) => {
   const summary = "The capital of France is Paris.";
   const run = await startFixtureTask(
     t,
-    (index) => (index === 0 ? { name: "finish_task", arguments: { summary } } : { text: "Done." }),
+    // A read_workspace tool result grounds the completion for the
+    // Critic gate (verifier spine); finish_task alone never grounds
+    // its own claim.
+    (index) =>
+      index === 0
+        ? { name: "read_workspace", arguments: { section: "files" } }
+        : index === 1
+          ? { name: "finish_task", arguments: { summary } }
+          : { text: "Done." },
     "What is the capital of France?",
   );
   try {
