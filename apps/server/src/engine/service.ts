@@ -33,6 +33,15 @@ import type { Files } from "../files.ts";
 import { backgroundFailure } from "../log.ts";
 import type { WorkspaceService } from "../workspace.ts";
 import { type AuditEvent, AuditLog, type AuditOutcome } from "./audit.ts";
+import {
+  type DeliveryRecord,
+  decideIncident,
+  deliveryRecordSchema,
+  incidentFromState,
+  isSilentOutput,
+  normalizeErrorSignature,
+  preflightMonitorJob,
+} from "./cron.ts";
 import { analyzeSpending } from "./finance.ts";
 import { type GraphitiLane, graphitiLaneFor } from "./graphiti.ts";
 import { type HindsightLane, hindsightLaneFor } from "./hindsight.ts";
@@ -73,7 +82,16 @@ export const UNCONFIRMED_RUN_FAILURE =
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const date = () => new Date().toISOString();
-const terminal = new Set(["succeeded", "failed", "cancelled"]);
+const terminal = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  // Cron-semantics terminal states for scheduled runs (engine/cron.ts).
+  "blocked_config",
+  "delivery_failed",
+  "delivery_unverified",
+  "unknown",
+]);
 export class AgentService {
   readonly worker: TaskWorker;
   // Mem0, the main memory lane. Configured only when MEM0_URL is set;
@@ -146,6 +164,10 @@ export class AgentService {
       else await this.recordAudit(owner, "task.failed", "failed", counts);
     } else if (task.status === "paused" && task.state.criticBlocked)
       await this.recordAudit(owner, "task.critic_blocked", "denied", counts);
+    else if (task.status === "blocked_config")
+      await this.recordAudit(owner, "cron.blocked_config", "denied", counts);
+    else if (task.status === "unknown")
+      await this.recordAudit(owner, "cron.unknown", "failed", counts);
   }
   // Recent content-free audit events for this owner, newest first
   // (the read surface the /api/agent/audit route serves).
@@ -754,6 +776,13 @@ export class AgentService {
       read: false,
     };
     await this.db.insertIfAbsent(owner, "notifications", value);
+    // Positive evidence only: the record is read back from the store
+    // before delivery is claimed, whether this call stored it or a
+    // previous publication of the same keyed notice did. A null here
+    // means the write neither stored nor found the record —
+    // delivery unconfirmed, which callers on the scheduled path
+    // record as delivery_unverified (engine/cron.ts).
+    return this.db.get<AgentNotification>(owner, "notifications", value.id);
   }
   mailEvidence(mail: Mail): Evidence {
     return { id: mail.id, kind: "mail", title: mail.subject, excerpt: mail.body.slice(0, 400) };
@@ -841,6 +870,40 @@ export class AgentService {
     }
     if (task.kind === "document") return this.document(owner, task, context);
     if (task.kind === "monitor") {
+      // Cron preflight (engine/cron.ts): a scheduled job whose
+      // definition no longer validates, whose prerequisites are
+      // missing, or whose delivery target does not resolve is
+      // blocked BEFORE any page fetch or model call. The block is
+      // terminal for the run, the watch pauses, and the alert is
+      // raised once — its notice key is stable per issue set, so
+      // re-publication can never re-alert.
+      const monitor = await this.db.get<Monitor>(owner, "monitors", String(task.input.monitorId));
+      const issues = preflightMonitorJob(task, monitor, this.config);
+      if (issues.length) {
+        const detail = `This watch is blocked by its configuration: ${issues.join("; ")}. Fix the watch to run it again.`;
+        if (monitor)
+          await this.db.compareAndSwap(
+            owner,
+            "monitors",
+            monitor.id,
+            { status: "active" },
+            { status: "paused", error: detail },
+          );
+        await context.event("error", "Watch blocked by configuration", detail);
+        return {
+          status: "blocked_config",
+          error: detail,
+          state: {
+            ...task.state,
+            blockedConfig: true,
+            notice: {
+              title: "Watch blocked — configuration needs attention",
+              body: detail,
+              key: `blocked-config:${task.id}:${hash(issues.join(";"))}`,
+            },
+          },
+        };
+      }
       try {
         return await this.observe(owner, task, context);
       } catch (error) {
@@ -867,18 +930,42 @@ export class AgentService {
           failures >= 5 ? "Watch paused after repeated failures" : "Check failed; retry scheduled",
           detail,
         );
+        // Incident dedup (engine/cron.ts): failures folding into the
+        // same normalized error signature alert once, remind after
+        // ~6h, and re-arm on success (observe clears the incident).
+        // The pause transition itself always alerts — it is a state
+        // change, not another tick of the same failure.
+        const signature = normalizeErrorSignature(detail);
+        const { action, incident } = decideIncident(
+          incidentFromState(task.state.incident),
+          signature,
+          hash(signature).slice(0, 16),
+          Date.now(),
+        );
+        const paused = failures >= 5;
+        const notice =
+          !paused && action === "suppress"
+            ? null
+            : {
+                title: "Watch needs attention",
+                body: detail,
+                // The key is per incident (its firstAt), not just per
+                // signature: a success re-arms alerting, and the new
+                // incident's first alert must not be swallowed by the
+                // previous incident's already-delivered notice.
+                key: `watch-error:${task.id}:${incident.hash}:${
+                  paused ? "paused" : action === "remind" ? `remind:${incident.reminders}` : "first"
+                }:${incident.firstAt}`,
+              };
         return {
-          status: failures >= 5 ? "paused" : "scheduled",
+          status: paused ? "paused" : "scheduled",
           error: detail,
           nextRunAt: nextCheckAt,
           state: {
             ...task.state,
             failures,
-            notice: {
-              title: "Watch needs attention",
-              body: detail,
-              key: `watch-error:${task.id}:${failures >= 5 ? "paused" : "retry"}`,
-            },
+            incident,
+            notice,
           },
         };
       }
@@ -1253,11 +1340,120 @@ export class AgentService {
         `review:${task.actionId}`,
       );
     }
+    if (task.status === "unknown") {
+      // A crashed scheduled attempt always delivers its outcome —
+      // the user must learn the run's result is unknown (and the
+      // dedup key keeps re-publication from repeating the alert).
+      await this.notify(
+        owner,
+        "Scheduled run outcome unknown",
+        task.error ?? task.title,
+        task.id,
+        `task-unknown:${task.id}:${task.attempts}`,
+      );
+    }
     const notice = z
       .object({ title: z.string(), body: z.string(), key: z.string() })
       .safeParse(task.state.notice);
-    if ((task.status === "scheduled" || (task.status === "paused" && task.error)) && notice.success)
-      await this.notify(owner, notice.data.title, notice.data.body, task.id, notice.data.key);
+    if (
+      (task.status === "scheduled" ||
+        task.status === "blocked_config" ||
+        (task.status === "paused" && task.error)) &&
+      notice.success
+    )
+      await this.deliverOutcomeNotice(owner, task, notice.data);
+  }
+  // Delivery of a settled scheduled run's outcome notice
+  // (engine/cron.ts): execution and delivery are separate facts, and
+  // a delivery counts as delivered ONLY on positive evidence — the
+  // notification record read back from the store (notify returns it),
+  // never on attempt. A store rejection is delivery_failed; a write
+  // that neither stored nor found the record is
+  // delivery_unverified. Both are terminal for a monitor run: the
+  // watch pauses in that state instead of ticking on with its alerts
+  // going nowhere. A [SILENT] run output suppresses SUCCESS delivery
+  // only — failure-class notices (the task carries an error) always
+  // deliver. The per-attempt delivery record on the task's state
+  // makes this idempotent: the maintenance scan re-offers every
+  // settled task, and a run's delivery is decided exactly once.
+  private async deliverOutcomeNotice(
+    owner: string,
+    task: AgentTask,
+    notice: { title: string; body: string; key: string },
+  ): Promise<void> {
+    const prior = deliveryRecordSchema.safeParse(task.state.delivery);
+    if (prior.success && prior.data.attempts === task.attempts && prior.data.key === notice.key)
+      return;
+    let status: DeliveryRecord["status"];
+    if (
+      !task.error &&
+      (isSilentOutput(notice.body) || isSilentOutput(notice.title) || isSilentOutput(task.result))
+    ) {
+      status = "suppressed_silent";
+    } else {
+      let stored: AgentNotification | null = null;
+      let rejected = false;
+      try {
+        stored = await this.notify(owner, notice.title, notice.body, task.id, notice.key);
+      } catch {
+        rejected = true;
+      }
+      status = rejected ? "delivery_failed" : stored ? "delivered" : "delivery_unverified";
+    }
+    const delivery: DeliveryRecord = {
+      attempts: task.attempts,
+      key: notice.key,
+      status,
+      at: date(),
+    };
+    const flip =
+      (status === "delivery_failed" || status === "delivery_unverified") &&
+      task.kind === "monitor" &&
+      (task.status === "scheduled" || task.status === "paused");
+    if (!flip) {
+      await this.db.compareAndSwap(
+        owner,
+        "tasks",
+        task.id,
+        { status: task.status, leaseId: task.leaseId ?? null },
+        { state: { ...task.state, delivery } },
+      );
+      return;
+    }
+    const detail =
+      status === "delivery_failed"
+        ? "The watch ran, but its outcome could not be delivered: the notification store rejected the alert. The watch is paused in a delivery-failed state; resume it once delivery works again."
+        : "The watch ran, but delivery of its outcome could not be confirmed: the notification was neither stored nor found afterwards. The watch is paused in a delivery-unverified state; resume it once delivery can be confirmed.";
+    const updated = await this.db.compareAndSwap(
+      owner,
+      "tasks",
+      task.id,
+      { status: task.status, leaseId: task.leaseId ?? null },
+      { status, error: detail, state: { ...task.state, delivery } },
+    );
+    if (!updated) return;
+    await this.db.compareAndSwap(
+      owner,
+      "monitors",
+      String(task.input.monitorId),
+      { status: "active" },
+      { status: "paused", error: detail },
+    );
+    await this.db.put(owner, "run-events", {
+      id: randomUUID(),
+      taskId: task.id,
+      kind: "error",
+      date: date(),
+      title:
+        status === "delivery_failed" ? "Outcome delivery failed" : "Outcome delivery unverified",
+      detail,
+    });
+    await this.recordAudit(
+      owner,
+      status === "delivery_failed" ? "cron.delivery_failed" : "cron.delivery_unverified",
+      "failed",
+      { tasks: 1, attempts: task.attempts },
+    );
   }
   private async document(
     owner: string,
@@ -1426,6 +1622,8 @@ export class AgentService {
         sessionId: observation.sessionId,
         matched,
         failures: 0,
+        // A successful check re-arms incident alerting (engine/cron.ts).
+        incident: null,
         notice: shouldNotify
           ? {
               title: monitor.title,

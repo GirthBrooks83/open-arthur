@@ -9,6 +9,13 @@ export class LostLeaseError extends Error {
     this.name = "LostLeaseError";
   }
 }
+// Cron semantics (Hermes cherry-pick, engine/cron.ts): a SCHEDULED
+// run attempt that stopped mid-flight — its lease expired with the
+// run ledger still open — resolves to this terminal error state. Its
+// outcome is honestly unknown: the attempt may have observed or
+// delivered something before it died, so it is NEVER auto-rerun.
+export const UNKNOWN_RUN_ERROR =
+  "This scheduled run stopped mid-flight and its outcome is unknown. It was not retried automatically; check the watch and run it again if needed.";
 export interface TaskContext {
   signal: AbortSignal;
   guard(): Promise<void>;
@@ -73,8 +80,27 @@ export class TaskWorker {
     this.lastTickAt = new Date(this.now()).toISOString();
     try {
       const records = await this.db.scan<AgentTask>("tasks");
+      // Resolve crashed scheduled attempts BEFORE collecting due
+      // work: a monitor task still marked running with an expired
+      // lease is a mid-flight crash, not a resumable checkpoint
+      // (non-scheduled tasks keep the checkpoint-recovery path in
+      // the due filter below — their saved state makes resuming
+      // safe; a monitor observation has no such checkpoint, and
+      // re-running it could double-deliver).
+      const resolvedUnknown = new Set<string>();
+      for (const { owner, value: t } of records)
+        if (
+          t.kind === "monitor" &&
+          t.status === "running" &&
+          !this.active.has(t.id) &&
+          (!t.leaseUntil || Date.parse(t.leaseUntil) <= this.now())
+        ) {
+          await this.resolveUnknown(owner, t);
+          resolvedUnknown.add(t.id);
+        }
       const due = records.filter(
         ({ value: t }) =>
+          !resolvedUnknown.has(t.id) &&
           !this.active.has(t.id) &&
           (t.status === "queued" ||
             (t.status === "scheduled" && Date.parse(t.nextRunAt ?? "") <= this.now()) ||
@@ -112,6 +138,49 @@ export class TaskWorker {
     } finally {
       this.ticking = false;
     }
+  }
+  // Close out a crashed scheduled attempt: the task leaves `running`
+  // for the terminal `unknown` state, its open ledger entry (the
+  // `runs` record keyed by the dead lease) is closed as `unknown`
+  // rather than left running forever, and the settled callback fires
+  // so the outcome is published and audited like any terminal run.
+  // The attempt is never re-queued.
+  private async resolveUnknown(owner: string, task: AgentTask) {
+    const settled = await this.db.compareAndSwap<AgentTask>(
+      owner,
+      "tasks",
+      task.id,
+      { status: "running", leaseId: task.leaseId ?? null },
+      {
+        status: "unknown",
+        error: UNKNOWN_RUN_ERROR,
+        leaseId: null,
+        leaseUntil: null,
+        updatedAt: new Date(this.now()).toISOString(),
+      },
+    );
+    if (!settled) return;
+    if (task.leaseId) {
+      const closed = await this.db.compareAndSwap(
+        owner,
+        "runs",
+        task.leaseId,
+        { status: "running" },
+        { status: "unknown", finishedAt: new Date(this.now()).toISOString() },
+      );
+      // A crash between claiming the lease and opening the ledger
+      // entry leaves no record to close; write the terminal entry so
+      // the ledger still shows the attempt's resolution.
+      if (!closed)
+        await this.db.put(owner, "runs", {
+          id: task.leaseId,
+          taskId: task.id,
+          startedAt: task.updatedAt,
+          finishedAt: new Date(this.now()).toISOString(),
+          status: "unknown",
+        });
+    }
+    if (this.options.settled) await this.options.settled(owner, settled);
   }
   private async run(owner: string, previous: AgentTask) {
     if (this.stopping) return;
