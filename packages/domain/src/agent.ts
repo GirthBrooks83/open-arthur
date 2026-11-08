@@ -9,7 +9,19 @@ export type TaskStatus =
   | "paused"
   | "succeeded"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  // Cron-semantics terminal states for scheduled runs (Hermes
+  // cherry-picks, engine/cron.ts): a run blocked by its preflight
+  // (blocked_config), a run whose execution finished but whose
+  // outcome delivery positively failed (delivery_failed) or could
+  // not be confirmed either way (delivery_unverified), and a run
+  // attempt that stopped mid-flight with no terminal record, whose
+  // outcome is honestly unknown and which is never auto-rerun
+  // (unknown).
+  | "blocked_config"
+  | "delivery_failed"
+  | "delivery_unverified"
+  | "unknown";
 export interface Evidence {
   id: string;
   kind: "mail" | "file" | "web" | "user";
