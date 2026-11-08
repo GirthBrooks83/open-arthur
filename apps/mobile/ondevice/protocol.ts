@@ -42,7 +42,28 @@ export const LOCAL_MODELS: LocalModelOption[] = [
     downloadBytes: 1_900_000_000,
     vramMB: 2_265,
   },
+  {
+    id: "Qwen2.5-3B-Instruct-q4f16_1-MLC",
+    label: "Qwen 2.5 (3B)",
+    blurb: "Strong at following instructions and short reasoning. Big download.",
+    downloadBytes: 1_750_000_000,
+    vramMB: 2_505,
+  },
+  {
+    id: "gemma-2-2b-it-q4f16_1-MLC",
+    label: "Gemma 2 (2B)",
+    blurb: "Google's small model — a middle ground on size and smarts.",
+    downloadBytes: 1_490_000_000,
+    vramMB: 1_895,
+  },
 ];
+
+/**
+ * The model pre-selected when the user has never picked one (or their
+ * saved pick is no longer in the catalog). Llama 3.2 3B — the original
+ * on-device default from when the local brain shipped.
+ */
+export const DEFAULT_LOCAL_MODEL_ID = "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 
 export function localModelById(id: string): LocalModelOption | undefined {
   return LOCAL_MODELS.find((model) => model.id === id);
@@ -72,7 +93,11 @@ export interface EngineChatMessage {
 export type EngineRequest =
   | { kind: "local-brain:init"; modelId: string }
   | { kind: "local-brain:generate"; id: string; messages: EngineChatMessage[] }
-  | { kind: "local-brain:interrupt"; id: string };
+  | { kind: "local-brain:interrupt"; id: string }
+  /** Ask which catalog models already have their weights cached on-device. */
+  | { kind: "local-brain:cache-status" }
+  /** Delete one model's cached weights/config/wasm from the device. */
+  | { kind: "local-brain:delete-cache"; modelId: string };
 
 /** Messages the engine page posts back to the app. */
 export type EngineEvent =
@@ -83,6 +108,10 @@ export type EngineEvent =
   /** Cumulative reply text for the in-flight generation. */
   | { kind: "local-brain:delta"; id: string; text: string }
   | { kind: "local-brain:done"; id: string }
+  /** Model ids whose weights are currently cached on this device. */
+  | { kind: "local-brain:cache"; cached: string[] }
+  /** A delete-cache request finished; followed by a fresh cache event. */
+  | { kind: "local-brain:cache-deleted"; modelId: string }
   | { kind: "local-brain:error"; id?: string; message: string };
 
 export function isEngineEvent(value: unknown): value is EngineEvent {
@@ -97,6 +126,8 @@ export function isEngineRequest(value: unknown): value is EngineRequest {
   return (
     kind === "local-brain:init" ||
     kind === "local-brain:generate" ||
-    kind === "local-brain:interrupt"
+    kind === "local-brain:interrupt" ||
+    kind === "local-brain:cache-status" ||
+    kind === "local-brain:delete-cache"
   );
 }
