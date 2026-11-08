@@ -32,6 +32,7 @@ import { AppError } from "../errors.ts";
 import type { Files } from "../files.ts";
 import { backgroundFailure } from "../log.ts";
 import type { WorkspaceService } from "../workspace.ts";
+import { type AuditEvent, AuditLog, type AuditOutcome } from "./audit.ts";
 import { analyzeSpending } from "./finance.ts";
 import { type GraphitiLane, graphitiLaneFor } from "./graphiti.ts";
 import { type HindsightLane, hindsightLaneFor } from "./hindsight.ts";
@@ -87,6 +88,9 @@ export class AgentService {
   // recall). Configured only when HINDSIGHT_URL is set;
   // failure-swallowing like the other lanes (see engine/hindsight.ts).
   readonly hindsight: HindsightLane;
+  // Content-free audit log (engine/audit.ts): the cross-task
+  // lifecycle record. Emissions are counts only — see recordAudit.
+  readonly auditLog: AuditLog;
   private maintenance?: ReturnType<typeof setInterval>;
   private refreshing = false;
   constructor(
@@ -101,9 +105,52 @@ export class AgentService {
     this.mem0 = mem0LaneFor(config);
     this.graphiti = graphitiLaneFor(config);
     this.hindsight = hindsightLaneFor(config);
+    this.auditLog = new AuditLog(db);
     this.worker = new TaskWorker(db, (owner, task, context) => this.execute(owner, task, context), {
-      settled: (owner, task) => this.publishOutcome(owner, task),
+      settled: async (owner, task) => {
+        await this.recordTaskOutcome(owner, task);
+        await this.publishOutcome(owner, task);
+      },
     });
+  }
+  // Content-free audit emissions (engine/audit.ts). Best-effort by
+  // design: an audit write must never fail the task or save it
+  // describes, so a store failure is swallowed here. The AuditLog
+  // itself throws on schema violations — these call sites pass only
+  // fixed operation names and integer counts, so a throw here can
+  // only be a store failure, never recorded content.
+  private async recordAudit(
+    owner: string,
+    operation: string,
+    outcome: AuditOutcome,
+    payload: Record<string, number> = {},
+  ): Promise<void> {
+    try {
+      await this.auditLog.record(owner, operation, outcome, payload);
+    } catch {
+      // Best-effort: the lifecycle action itself already succeeded.
+    }
+  }
+  // Terminal lifecycle outcomes, emitted once per settled run (the
+  // worker's settled callback — maintain()'s recovery scan calls
+  // publishOutcome directly and never reaches this, so recovery
+  // cannot duplicate an outcome). Non-terminal settlements
+  // (queued/scheduled/waiting_*) record nothing.
+  private async recordTaskOutcome(owner: string, task: AgentTask): Promise<void> {
+    const counts = { tasks: 1, attempts: task.attempts };
+    if (task.status === "succeeded")
+      await this.recordAudit(owner, "task.completed", "succeeded", counts);
+    else if (task.status === "failed") {
+      if (task.state.verificationFailed)
+        await this.recordAudit(owner, "task.verification_failed", "failed", counts);
+      else await this.recordAudit(owner, "task.failed", "failed", counts);
+    } else if (task.status === "paused" && task.state.criticBlocked)
+      await this.recordAudit(owner, "task.critic_blocked", "denied", counts);
+  }
+  // Recent content-free audit events for this owner, newest first
+  // (the read surface the /api/agent/audit route serves).
+  async auditEvents(owner: string, limit = 50): Promise<AuditEvent[]> {
+    return this.auditLog.events(owner, limit);
   }
   // Save a memory to the internal store (canonical — this is the write
   // that must succeed), then mirror it to the memory lanes (Mem0, the
@@ -123,6 +170,9 @@ export class AgentService {
       if (this.mem0.configured) await this.mem0.add(memory.text).catch(() => false);
       if (this.graphiti.configured) await this.graphiti.add(memory.text).catch(() => false);
       if (this.hindsight.configured) await this.hindsight.add(memory.text).catch(() => false);
+      // A memory was actually written (a duplicate insertIfAbsent
+      // returns null above and is not a new write): count it.
+      await this.recordAudit(owner, "memory.saved", "succeeded", { memories: 1 });
     }
     return saved ?? memory;
   }
@@ -343,7 +393,8 @@ export class AgentService {
       artifactIds: [],
     };
     await this.ensure(owner);
-    await this.db.insertIfAbsent(owner, "tasks", task);
+    const inserted = await this.db.insertIfAbsent(owner, "tasks", task);
+    if (inserted) await this.recordAudit(owner, "task.created", "succeeded", { tasks: 1 });
     return (await this.db.get<AgentTask>(owner, "tasks", id)) ?? task;
   }
   async control(owner: string, id: string, action: "pause" | "resume" | "cancel" | "retry") {
@@ -762,6 +813,10 @@ export class AgentService {
     task: AgentTask,
     context: TaskContext,
   ): Promise<Partial<AgentTask>> {
+    await this.recordAudit(owner, "task.started", "succeeded", {
+      tasks: 1,
+      attempts: task.attempts,
+    });
     await context.event(
       "status",
       task.attempts === 1 ? "Started working" : "Resumed work",
@@ -1046,6 +1101,15 @@ export class AgentService {
         );
       }
       const approved = verification.approved && readBackVerified;
+      // The Verifier stage's own outcome joins the audit log (the
+      // task-level mirror — task.verification_failed or
+      // task.completed — is emitted when the run settles).
+      await this.recordAudit(
+        owner,
+        approved ? "verifier.approved" : "verifier.rejected",
+        approved ? "succeeded" : "failed",
+        { verifications: 1, citations: verification.reportedCitationCount },
+      );
       trace.push({
         sequence: 5,
         agent: "verifier",
