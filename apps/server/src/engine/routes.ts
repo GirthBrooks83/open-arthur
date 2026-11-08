@@ -132,6 +132,16 @@ export function agentRoutes(service: AgentService): Hono<{ Variables: { owner: s
   app.get("/notifications", async (c) =>
     c.json((await service.snapshot(c.get("owner"))).notifications),
   );
+  // Content-free audit log (engine/audit.ts): recent lifecycle
+  // events for this owner, newest first. Events carry counts only
+  // by construction, so this surface needs no content review. The
+  // page size is capped at 100 (the AuditLog itself allows 1000).
+  app.get("/audit", async (c) => {
+    const { limit } = z
+      .object({ limit: z.coerce.number().int().min(1).max(100).default(50) })
+      .parse({ limit: c.req.query("limit") });
+    return c.json(await service.auditEvents(c.get("owner"), limit));
+  });
   app.post("/notifications/:id/read", async (c) => {
     const notification = await service.db.compareAndSwap<AgentNotification>(
       c.get("owner"),
