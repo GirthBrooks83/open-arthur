@@ -9,12 +9,19 @@
 // model download from WebLLM's public model host; after that the
 // weights are cached on-device and chat works offline.
 
-import { CreateMLCEngine, type MLCEngine } from "@mlc-ai/web-llm";
+import {
+  CreateMLCEngine,
+  deleteModelAllInfoInCache,
+  hasModelInCache,
+  type MLCEngine,
+} from "@mlc-ai/web-llm";
 import {
   type EngineChatMessage,
   type EngineEvent,
   type EngineRequest,
   isEngineRequest,
+  LOCAL_MODELS,
+  localModelById,
   ON_DEVICE_SYSTEM_PROMPT,
 } from "./protocol";
 
@@ -68,6 +75,8 @@ async function init(modelId: string): Promise<void> {
       }
       loadedModelId = modelId;
       post({ kind: "local-brain:ready" });
+      // A fresh download just landed in the cache; keep the picker honest.
+      void postCacheStatus();
     } catch (error) {
       fail(
         `The on-device model couldn't load: ${error instanceof Error ? error.message : String(error)}`,
@@ -129,6 +138,40 @@ async function interrupt(id: string): Promise<void> {
   post({ kind: "local-brain:done", id });
 }
 
+async function postCacheStatus(): Promise<void> {
+  const cached: string[] = [];
+  for (const model of LOCAL_MODELS) {
+    try {
+      if (await hasModelInCache(model.id)) cached.push(model.id);
+    } catch {
+      // A cache probe failing for one model must not hide the others.
+    }
+  }
+  post({ kind: "local-brain:cache", cached });
+}
+
+async function deleteCache(modelId: string): Promise<void> {
+  if (!localModelById(modelId)) {
+    fail(`Unknown on-device model: ${modelId}`);
+    return;
+  }
+  if (loadedModelId === modelId) {
+    fail(
+      "That model is loaded right now — switch to another model first, then remove its download.",
+    );
+    return;
+  }
+  try {
+    await deleteModelAllInfoInCache(modelId);
+    post({ kind: "local-brain:cache-deleted", modelId });
+  } catch (error) {
+    fail(
+      `The downloaded model couldn't be removed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  await postCacheStatus();
+}
+
 window.addEventListener("message", (event: MessageEvent<unknown>) => {
   // Only the hosting app page (same origin, our parent frame) may drive us.
   if (event.origin !== window.location.origin || event.source !== window.parent) return;
@@ -137,6 +180,8 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (request.kind === "local-brain:init") void init(request.modelId);
   else if (request.kind === "local-brain:generate") void generate(request.id, request.messages);
   else if (request.kind === "local-brain:interrupt") void interrupt(request.id);
+  else if (request.kind === "local-brain:cache-status") void postCacheStatus();
+  else if (request.kind === "local-brain:delete-cache") void deleteCache(request.modelId);
 });
 
 // Announce ourselves so the app can tell "engine page loaded" apart

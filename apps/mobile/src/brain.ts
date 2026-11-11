@@ -11,11 +11,47 @@
 // engine state machine). It has no React or DOM imports of its own so
 // it can be unit tested directly; callers pass in what they detected.
 
-import { formatBytes, LOCAL_MODELS, type LocalModelOption } from "../ondevice/protocol";
+import {
+  DEFAULT_LOCAL_MODEL_ID,
+  formatBytes,
+  LOCAL_MODELS,
+  type LocalModelOption,
+  localModelById,
+} from "../ondevice/protocol";
 
 export type BrainMode = "cloud" | "local";
 
-export { formatBytes, LOCAL_MODELS, type LocalModelOption };
+export { DEFAULT_LOCAL_MODEL_ID, formatBytes, LOCAL_MODELS, type LocalModelOption };
+
+/**
+ * Which model the picker starts on: the user's saved pick when it is
+ * still in the catalog, otherwise the default model. A stale saved id
+ * (model removed from the catalog in an update) must never strand the
+ * picker on a model that no longer exists.
+ */
+export function resolveSavedModelId(saved: string | null | undefined): string {
+  if (saved && localModelById(saved)) return saved;
+  return DEFAULT_LOCAL_MODEL_ID;
+}
+
+/**
+ * A downloaded model's cache may be deleted from the picker only when
+ * the model is actually cached and is not the one currently loaded,
+ * loading, or mid-reply — deleting weights out from under a live
+ * engine would break the running model. Switching to another model
+ * (or reloading the page) releases it.
+ */
+export function canDeleteModelCache(
+  modelId: string,
+  state: LocalBrainState,
+  cachedModelIds: readonly string[],
+): boolean {
+  if (!cachedModelIds.includes(modelId)) return false;
+  const busy =
+    state.modelId === modelId &&
+    (state.stage === "downloading" || state.stage === "ready" || state.stage === "generating");
+  return !busy;
+}
 
 /** Downloads at or above this size get the strong storage warning. */
 export const LARGE_DOWNLOAD_BYTES = 1_500_000_000;

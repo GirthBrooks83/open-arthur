@@ -12,6 +12,7 @@ import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { type EngineEvent, type EngineRequest, isEngineEvent } from "../ondevice/protocol";
 import {
   canChatLocally,
+  canDeleteModelCache,
   detectLocalBrainSupport,
   downloadWarning,
   formatBytes,
@@ -19,6 +20,7 @@ import {
   LOCAL_MODELS,
   LOCAL_REPLY_LABEL,
   localBrainReducer,
+  resolveSavedModelId,
 } from "./brain";
 import { Button, Card, Chip, colors, ErrorNotice, s } from "./ui";
 
@@ -39,12 +41,11 @@ function deviceHasWebGPU(): boolean {
 
 function savedModelId(): string {
   try {
-    const value = window.localStorage.getItem(MODEL_STORAGE_KEY);
-    if (value && LOCAL_MODELS.some((model) => model.id === value)) return value;
+    return resolveSavedModelId(window.localStorage.getItem(MODEL_STORAGE_KEY));
   } catch {
-    // Private mode / storage disabled: fall back to the default below.
+    // Private mode / storage disabled: fall back to the default model.
+    return resolveSavedModelId(null);
   }
-  return LOCAL_MODELS[0]?.id ?? "";
 }
 
 export function LocalBrainChat() {
@@ -57,6 +58,9 @@ export function LocalBrainChat() {
   const [draft, setDraft] = useState("");
   const [enginePageLoaded, setEnginePageLoaded] = useState(false);
   const [genError, setGenError] = useState("");
+  /** Model ids with weights cached on this device; null until the engine reports. */
+  const [cachedModelIds, setCachedModelIds] = useState<string[] | null>(null);
+  const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
   const frame = useRef<HTMLIFrameElement | null>(null);
   const generation = useRef<string | null>(null);
   const list = useRef<ScrollView>(null);
@@ -83,6 +87,16 @@ export function LocalBrainChat() {
       switch (engineEvent.kind) {
         case "local-brain:hello":
           setEnginePageLoaded(true);
+          frame.current?.contentWindow?.postMessage(
+            { kind: "local-brain:cache-status" } satisfies EngineRequest,
+            window.location.origin,
+          );
+          break;
+        case "local-brain:cache":
+          setCachedModelIds(engineEvent.cached);
+          break;
+        case "local-brain:cache-deleted":
+          setDeletingModelId(null);
           break;
         case "local-brain:progress":
           dispatch({ type: "progress", progress: engineEvent.progress, text: engineEvent.text });
@@ -105,6 +119,7 @@ export function LocalBrainChat() {
           }
           break;
         case "local-brain:error":
+          setDeletingModelId(null);
           if (engineEvent.id && engineEvent.id === generation.current) {
             generation.current = null;
             setGenError(engineEvent.message);
@@ -147,6 +162,12 @@ export function LocalBrainChat() {
     }
     dispatch({ type: "init-started", modelId: id });
     post({ kind: "local-brain:init", modelId: id });
+  }
+
+  function removeDownload(id: string) {
+    setDeletingModelId(id);
+    setGenError("");
+    post({ kind: "local-brain:delete-cache", modelId: id });
   }
 
   function send() {
@@ -207,15 +228,19 @@ export function LocalBrainChat() {
           const isLoaded =
             state.stage !== "idle" && state.modelId === model.id && state.stage !== "error";
           const isDownloadingThis = downloading && state.modelId === model.id;
+          const isCached = cachedModelIds?.includes(model.id) ?? false;
+          const canDelete = canDeleteModelCache(model.id, state, cachedModelIds ?? []);
+          const isDeletingThis = deletingModelId === model.id;
           return (
             <View key={model.id} style={{ gap: 6, paddingTop: 6 }}>
               <View style={[s.row, { gap: 8, flexWrap: "wrap" }]}>
                 <Text style={[s.text, { fontWeight: "600" }]}>{model.label}</Text>
                 <Chip>{`About ${formatBytes(model.downloadBytes)} download`}</Chip>
                 {isLoaded && !isDownloadingThis && <Chip tint={colors.sky}>Loaded</Chip>}
+                {isCached && !isLoaded && <Chip>Downloaded ✓</Chip>}
               </View>
               <Text style={s.muted}>{model.blurb}</Text>
-              <Text style={s.small}>{downloadWarning(model)}</Text>
+              {!isCached && <Text style={s.small}>{downloadWarning(model)}</Text>}
               {isDownloadingThis ? (
                 <View style={{ gap: 6 }}>
                   <View
@@ -240,14 +265,38 @@ export function LocalBrainChat() {
                   </Text>
                 </View>
               ) : (
-                <Button
-                  small
-                  disabled={downloading || (isLoaded && state.modelId === model.id)}
-                  onPress={() => startModel(model.id)}
-                  style={{ alignSelf: "flex-start" }}
-                >
-                  {isLoaded ? "Using this model" : "Download & use this model"}
-                </Button>
+                <View style={[s.row, { gap: 8, flexWrap: "wrap" }]}>
+                  <Button
+                    small
+                    disabled={downloading || (isLoaded && state.modelId === model.id)}
+                    onPress={() => startModel(model.id)}
+                    style={{ alignSelf: "flex-start" }}
+                  >
+                    {isLoaded
+                      ? "Using this model"
+                      : isCached
+                        ? "Use this model"
+                        : "Download & use this model"}
+                  </Button>
+                  {canDelete && (
+                    <Button
+                      small
+                      disabled={deletingModelId !== null || downloading}
+                      onPress={() => removeDownload(model.id)}
+                      style={{ alignSelf: "flex-start" }}
+                    >
+                      {isDeletingThis
+                        ? "Removing…"
+                        : `Remove download (free ${formatBytes(model.downloadBytes)})`}
+                    </Button>
+                  )}
+                </View>
+              )}
+              {isCached && isLoaded && !isDownloadingThis && (
+                <Text style={s.small}>
+                  To free its space, switch to another model first — then its Remove button appears
+                  here.
+                </Text>
               )}
             </View>
           );
