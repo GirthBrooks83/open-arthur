@@ -132,6 +132,36 @@ export function agentRoutes(service: AgentService): Hono<{ Variables: { owner: s
   app.get("/notifications", async (c) =>
     c.json((await service.snapshot(c.get("owner"))).notifications),
   );
+  // Nightly distillation (engine/distillation.ts): the manual
+  // trigger runs the real pipeline (distill -> hash-settle ->
+  // supersession handoff -> dream diary) on demand; the schedule
+  // action ensures the nightly worker task exists; the diary and
+  // runs are the operator's read surfaces for what distillation did.
+  const distillationDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "date must be YYYY-MM-DD");
+  app.post("/distillation/run", async (c) => {
+    const raw = await c.req.text();
+    const body = z
+      .object({ date: distillationDateSchema.optional() })
+      .parse(raw ? JSON.parse(raw) : {});
+    return c.json(await service.runDistillation(c.get("owner"), body.date));
+  });
+  app.post("/distillation/schedule", async (c) =>
+    c.json(await service.ensureDistillationJob(c.get("owner")), 201),
+  );
+  app.get("/distillation/diary", async (c) => {
+    const date = c.req.query("date");
+    if (date !== undefined) distillationDateSchema.parse(date);
+    const diary = await service.dreamDiary(c.get("owner"), date);
+    if (!diary) throw new AppError("No dream diary entry found", 404);
+    return c.json(diary);
+  });
+  app.get("/distillation/diaries", async (c) => c.json(await service.dreamDiaries(c.get("owner"))));
+  app.get("/distillation/runs", async (c) => {
+    const { limit } = z
+      .object({ limit: z.coerce.number().int().min(1).max(100).default(20) })
+      .parse({ limit: c.req.query("limit") });
+    return c.json(await service.distillationRuns(c.get("owner"), limit));
+  });
   // Content-free audit log (engine/audit.ts): recent lifecycle
   // events for this owner, newest first. Events carry counts only
   // by construction, so this surface needs no content review. The

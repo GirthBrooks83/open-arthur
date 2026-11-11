@@ -42,6 +42,17 @@ import {
   normalizeErrorSignature,
   preflightMonitorJob,
 } from "./cron.ts";
+import {
+  DISTILLATION_RUN_KIND,
+  type DistillationOutcome,
+  type DistillationRun,
+  DREAM_DIARY_KIND,
+  type DreamDiary,
+  nextDistillationRunAt,
+  recordSettledFact,
+  runDistillationPass,
+  scheduledDistillationDate,
+} from "./distillation.ts";
 import { analyzeSpending } from "./finance.ts";
 import { type GraphitiLane, graphitiLaneFor } from "./graphiti.ts";
 import { type HindsightLane, hindsightLaneFor } from "./hindsight.ts";
@@ -174,6 +185,224 @@ export class AgentService {
   async auditEvents(owner: string, limit = 50): Promise<AuditEvent[]> {
     return this.auditLog.events(owner, limit);
   }
+  // --- Nightly distillation (engine/distillation.ts, PR-delta) ---
+  // The core pass is shared by the manual trigger and the scheduled
+  // worker task; only their delivery differs (see below).
+  private async runDistillationCore(
+    owner: string,
+    date: string,
+    trigger: "manual" | "scheduled",
+  ): Promise<DistillationOutcome> {
+    return runDistillationPass({
+      db: this.db,
+      owner,
+      mem0: this.mem0,
+      graphiti: this.graphiti,
+      date,
+      trigger,
+    });
+  }
+  private async recordDistillationAudit(owner: string, run: DistillationRun): Promise<void> {
+    const counts = {
+      runs: 1,
+      sources: run.sources,
+      distilled: run.distilled,
+      duplicates: run.duplicates,
+      settled: run.settled,
+      candidates: run.supersessionCandidates,
+      superseded: run.superseded,
+    };
+    if (run.status === "succeeded")
+      await this.recordAudit(owner, "distillation.completed", "succeeded", counts);
+    else if (run.status === "partial")
+      await this.recordAudit(owner, "distillation.partial", "failed", counts);
+    else await this.recordAudit(owner, "distillation.blocked_config", "denied", counts);
+  }
+  // Manual trigger (the /memory dream analogue): runs the REAL
+  // pipeline — distill -> hash-settle -> supersession handoff ->
+  // diary — and delivers the outcome notice with gamma delivery
+  // semantics: the notice counts as delivered only on positive
+  // evidence (the notification record read back from the store via
+  // notify()), a store rejection is delivery_failed, and a write
+  // that neither stored nor found the record is
+  // delivery_unverified. The delivery verdict is recorded on the
+  // run; delivery problems never fail the run itself.
+  async runDistillation(
+    owner: string,
+    date?: string,
+  ): Promise<{ run: DistillationRun; diary: DreamDiary | null }> {
+    const day = date ?? new Date().toISOString().slice(0, 10);
+    const outcome = await this.runDistillationCore(owner, day, "manual");
+    await this.recordDistillationAudit(owner, outcome.run);
+    const { run } = outcome;
+    let title: string;
+    let body: string;
+    let key: string;
+    if (run.status === "blocked_config") {
+      title = "Distillation blocked — configuration needs attention";
+      body = `The nightly distillation for ${run.date} is blocked by its configuration: ${run.issues.join("; ")}.`;
+      // Stable per issue set, like the monitor blocked_config alert:
+      // re-running while blocked never re-alerts.
+      key = `distillation-blocked:${hash(run.issues.join(";"))}`;
+    } else if (run.status === "partial") {
+      title = "Distillation needs attention";
+      body = `Distillation for ${run.date} finished partially: ${run.issues.join("; ")}. Unsettled material stays retryable.`;
+      key = `distillation-partial:${run.date}:${run.id}`;
+    } else {
+      title = "Dream diary ready";
+      body = `Distillation for ${run.date} settled ${run.settled} new fact(s) into Mem0 and flagged ${run.supersessionCandidates} supersession candidate(s). The dream diary for ${run.date} is ready.`;
+      // One delivery per day: a no-op re-run re-offers the same key
+      // and the store's insertIfAbsent keeps it a single notice.
+      key = `dream-diary:${run.date}`;
+    }
+    let deliveryStatus: DistillationRun["deliveryStatus"];
+    try {
+      const stored = await this.notify(owner, title, body, undefined, key);
+      deliveryStatus = stored ? "delivered" : "delivery_unverified";
+    } catch {
+      deliveryStatus = "delivery_failed";
+    }
+    const recorded: DistillationRun = { ...run, deliveryStatus };
+    await this.db.put(owner, DISTILLATION_RUN_KIND, recorded);
+    return { run: recorded, diary: outcome.diary };
+  }
+  // Recent distillation runs for this owner, newest first.
+  async distillationRuns(owner: string, limit = 20): Promise<DistillationRun[]> {
+    const runs = await this.db.list<DistillationRun>(owner, DISTILLATION_RUN_KIND);
+    return runs.slice(0, Math.max(1, Math.min(100, limit)));
+  }
+  // The dream diary entry for one day (or the latest when no day is
+  // given); null when no run has written one.
+  async dreamDiary(owner: string, date?: string): Promise<DreamDiary | null> {
+    if (date) return this.db.get<DreamDiary>(owner, DREAM_DIARY_KIND, date);
+    const entries = await this.db.list<DreamDiary>(owner, DREAM_DIARY_KIND);
+    return entries[0] ?? null;
+  }
+  async dreamDiaries(owner: string): Promise<DreamDiary[]> {
+    return this.db.list<DreamDiary>(owner, DREAM_DIARY_KIND);
+  }
+  // Ensure the nightly scheduled distillation job exists: a worker
+  // task (kind "agent", input.distillation) created idempotently
+  // and parked in `scheduled` with the next nightly nextRunAt, so
+  // the existing TaskWorker leases and runs it — the gamma
+  // scheduled-run machinery, not a second scheduler. Each run
+  // returns `scheduled` again with the following night's time.
+  async ensureDistillationJob(owner: string): Promise<AgentTask> {
+    const task = await this.createTask(
+      owner,
+      {
+        kind: "agent",
+        title: "Nightly distillation",
+        prompt:
+          "Distill the day's memories and task outcomes into durable facts: settle new facts into Mem0 under the content-hash gate, hand supersession candidates to Graphiti, and write the dream diary.",
+        input: { distillation: true },
+      },
+      "distillation-nightly",
+      true,
+    );
+    if (task.status === "paused" && task.attempts === 0) {
+      const scheduled = await this.db.compareAndSwap<AgentTask>(
+        owner,
+        "tasks",
+        task.id,
+        { status: "paused", attempts: 0 },
+        { status: "scheduled", nextRunAt: nextDistillationRunAt(new Date()) },
+      );
+      if (scheduled) return scheduled;
+      return (await this.db.get<AgentTask>(owner, "tasks", task.id)) ?? task;
+    }
+    return task;
+  }
+  // The scheduled run's execution (called from execute()): the same
+  // core pass the manual trigger runs, over the day that just ended.
+  // Outcomes map onto the gamma scheduled-run states: preflight
+  // failure is terminal blocked_config with a stable-keyed alert;
+  // success and partial both reschedule for the next night, with
+  // the outcome notice carried in state.notice for the standard
+  // delivery path (publishOutcome -> deliverOutcomeNotice), and a
+  // partial folds into the task's incident by normalized signature
+  // (alert once, remind after ~6h, success re-arms).
+  private async executeDistillation(
+    owner: string,
+    task: AgentTask,
+    context: TaskContext,
+  ): Promise<Partial<AgentTask>> {
+    const day = scheduledDistillationDate(new Date());
+    const outcome = await this.runDistillationCore(owner, day, "scheduled");
+    await this.recordDistillationAudit(owner, outcome.run);
+    const { run } = outcome;
+    if (run.status === "blocked_config") {
+      const detail = `This distillation job is blocked by its configuration: ${run.issues.join("; ")}. Configure a memory lane to run it again.`;
+      await context.event("error", "Distillation blocked by configuration", detail);
+      return {
+        status: "blocked_config",
+        error: detail,
+        state: {
+          ...task.state,
+          blockedConfig: true,
+          notice: {
+            title: "Distillation blocked — configuration needs attention",
+            body: detail,
+            key: `blocked-config:${task.id}:${hash(run.issues.join(";"))}`,
+          },
+        },
+      };
+    }
+    const nextRunAt = nextDistillationRunAt(new Date());
+    if (run.status === "partial") {
+      await context.event("error", "Distillation finished partially", run.issues.join("; "));
+      const signature = run.failureSignature ?? "distillation lane failure";
+      const { action, incident } = decideIncident(
+        incidentFromState(task.state.incident),
+        signature,
+        hash(signature).slice(0, 16),
+        Date.now(),
+      );
+      const failures = Number(task.state.failures ?? 0) + 1;
+      return {
+        status: "scheduled",
+        nextRunAt,
+        error: run.issues.join("; "),
+        result: `Distillation for ${run.date} finished partially; unsettled material stays retryable.`,
+        state: {
+          ...task.state,
+          failures,
+          incident,
+          notice:
+            action === "suppress"
+              ? null
+              : {
+                  title: "Distillation needs attention",
+                  body: `Distillation for ${run.date} finished partially: ${run.issues.join("; ")}. Unsettled material stays retryable.`,
+                  key: `distillation-partial:${task.id}:${incident.hash}:${
+                    action === "remind" ? `remind:${incident.reminders}` : "first"
+                  }:${incident.firstAt}`,
+                },
+        },
+      };
+    }
+    await context.event(
+      "result",
+      "Distillation complete",
+      `Settled ${run.settled} fact(s); ${run.supersessionCandidates} supersession candidate(s) flagged.`,
+    );
+    return {
+      status: "scheduled",
+      nextRunAt,
+      error: null,
+      result: `Distillation for ${run.date} complete. Dream diary written.`,
+      state: {
+        ...task.state,
+        failures: 0,
+        incident: null,
+        notice: {
+          title: "Dream diary ready",
+          body: `Distillation for ${run.date} settled ${run.settled} new fact(s) into Mem0 and flagged ${run.supersessionCandidates} supersession candidate(s).`,
+          key: `dream-diary:${run.date}`,
+        },
+      },
+    };
+  }
   // Save a memory to the internal store (canonical — this is the write
   // that must succeed), then mirror it to the memory lanes (Mem0, the
   // main lane, Graphiti, the side lane, and Hindsight, the third lane).
@@ -189,7 +418,15 @@ export class AgentService {
     // insertIfAbsent that found an existing record returns null; that
     // record was already mirrored when it was first saved).
     if (saved !== null || !ifAbsent) {
-      if (this.mem0.configured) await this.mem0.add(memory.text).catch(() => false);
+      if (this.mem0.configured) {
+        const mirrored = await this.mem0.add(memory.text).catch(() => false);
+        // A successful mirror means the lane already holds this
+        // fact: settle its content hash so the nightly distillation
+        // job (engine/distillation.ts) never writes it a second
+        // time (Mem0 has no delete endpoint — duplicates are
+        // forever). Best-effort, like the audit emissions.
+        if (mirrored) await recordSettledFact(this.db, owner, memory.text).catch(() => undefined);
+      }
       if (this.graphiti.configured) await this.graphiti.add(memory.text).catch(() => false);
       if (this.hindsight.configured) await this.hindsight.add(memory.text).catch(() => false);
       // A memory was actually written (a duplicate insertIfAbsent
@@ -869,6 +1106,11 @@ export class AgentService {
       else return { status: "waiting_approval" };
     }
     if (task.kind === "document") return this.document(owner, task, context);
+    // Nightly distillation (engine/distillation.ts): the scheduled
+    // job is an ordinary worker task flagged by its input, so it
+    // rides the same leasing/settled/delivery machinery as monitors
+    // and never reaches the model path (deterministic v1).
+    if (task.input.distillation === true) return this.executeDistillation(owner, task, context);
     if (task.kind === "monitor") {
       // Cron preflight (engine/cron.ts): a scheduled job whose
       // definition no longer validates, whose prerequisites are
