@@ -219,6 +219,33 @@ export function agentRoutes(service: AgentService): Hono<{ Variables: { owner: s
     const body = await c.req.json();
     return c.json(await service.skillManage(c.get("owner"), skillManageOpSchema.parse(body)), 201);
   });
+  // Daily Brief (engine/daily-brief.ts): the manual trigger builds
+  // the real brief (buckets -> dream diary -> lessons violated ->
+  // self-review proposals -> Slack post) on demand; the schedule
+  // action ensures the morning worker task exists; the briefs are
+  // the operator's read surface for what the day held.
+  const briefDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "date must be YYYY-MM-DD");
+  app.post("/brief/run", async (c) => {
+    const raw = await c.req.text();
+    const body = z.object({ date: briefDateSchema.optional() }).parse(raw ? JSON.parse(raw) : {});
+    return c.json(await service.runDailyBrief(c.get("owner"), body.date));
+  });
+  app.post("/brief/schedule", async (c) =>
+    c.json(await service.ensureDailyBriefJob(c.get("owner")), 201),
+  );
+  app.get("/brief", async (c) => {
+    const date = c.req.query("date");
+    if (date !== undefined) briefDateSchema.parse(date);
+    const brief = await service.dailyBrief(c.get("owner"), date);
+    if (!brief) throw new AppError("No daily brief found", 404);
+    return c.json(brief);
+  });
+  app.get("/briefs", async (c) => {
+    const { limit } = z
+      .object({ limit: z.coerce.number().int().min(1).max(100).default(20) })
+      .parse({ limit: c.req.query("limit") });
+    return c.json(await service.dailyBriefs(c.get("owner"), limit));
+  });
   // Content-free audit log (engine/audit.ts): recent lifecycle
   // events for this owner, newest first. Events carry counts only
   // by construction, so this surface needs no content review. The

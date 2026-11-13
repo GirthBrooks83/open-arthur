@@ -43,6 +43,16 @@ import {
   preflightMonitorJob,
 } from "./cron.ts";
 import {
+  DAILY_BRIEF_KIND,
+  type DailyBrief,
+  type DailyBriefOutcome,
+  dailyBriefSlackFor,
+  nextDailyBriefRunAt,
+  runDailyBriefPass,
+  type SlackBriefPoster,
+  scheduledBriefDate,
+} from "./daily-brief.ts";
+import {
   DISTILLATION_RUN_KIND,
   type DistillationOutcome,
   type DistillationRun,
@@ -142,6 +152,12 @@ export class AgentService {
   // Content-free audit log (engine/audit.ts): the cross-task
   // lifecycle record. Emissions are counts only — see recordAudit.
   readonly auditLog: AuditLog;
+  // Daily Brief Slack poster (engine/daily-brief.ts): the Slack
+  // bridge's bot token posting the brief to the team channel.
+  // Configured only when both SLACK_BOT_TOKEN and
+  // SLACK_BRIEF_CHANNEL are set; failure-swallowing by value, like
+  // the memory lanes.
+  readonly briefSlack: SlackBriefPoster;
   private maintenance?: ReturnType<typeof setInterval>;
   private refreshing = false;
   constructor(
@@ -157,6 +173,7 @@ export class AgentService {
     this.graphiti = graphitiLaneFor(config);
     this.hindsight = hindsightLaneFor(config);
     this.auditLog = new AuditLog(db);
+    this.briefSlack = dailyBriefSlackFor(config);
     this.worker = new TaskWorker(db, (owner, task, context) => this.execute(owner, task, context), {
       settled: async (owner, task) => {
         await this.recordTaskOutcome(owner, task);
@@ -686,6 +703,195 @@ export class AgentService {
               ? `The background review for ${run.date} staged ${run.proposals} skill proposal(s). Nothing applies until approved.`
               : `The background review for ${run.date} reviewed ${run.tasksReviewed} task(s) and proposed nothing.`,
           key: `skill-review:${run.date}:${run.id}`,
+        },
+      },
+    };
+  }
+  // --- Daily Brief (engine/daily-brief.ts, PR-zeta) ---
+  // The core pass is shared by the manual trigger and the scheduled
+  // worker task; only their in-app delivery differs. The Slack post
+  // happens inside the pass itself (gated per date), so both paths
+  // post exactly the same way and a date is never posted twice.
+  private async runDailyBriefCore(
+    owner: string,
+    date: string,
+    trigger: "manual" | "scheduled",
+  ): Promise<DailyBriefOutcome> {
+    return runDailyBriefPass({
+      db: this.db,
+      owner,
+      slack: this.briefSlack,
+      date,
+      trigger,
+    });
+  }
+  private async recordDailyBriefAudit(owner: string, brief: DailyBrief): Promise<void> {
+    const counts = {
+      briefs: 1,
+      finished: brief.finishedCount,
+      running: brief.runningCount,
+      needs_decision: brief.needsDecisionCount,
+      lessons: brief.lessonsViolated.length,
+      proposals: brief.selfReviewProposals.length,
+    };
+    if (brief.status === "succeeded")
+      await this.recordAudit(owner, "brief.completed", "succeeded", counts);
+    else await this.recordAudit(owner, "brief.blocked_config", "denied", counts);
+  }
+  // Manual trigger: builds the REAL brief — buckets, dream diary,
+  // lessons violated, self-review proposals, Slack post — and
+  // delivers the in-app outcome notice with gamma delivery
+  // semantics: delivered only on positive evidence (the
+  // notification record read back from the store via notify()), a
+  // store rejection is delivery_failed, and a write that neither
+  // stored nor found the record is delivery_unverified. The
+  // verdict is recorded on the brief; delivery problems never fail
+  // the brief itself.
+  async runDailyBrief(owner: string, date?: string): Promise<{ brief: DailyBrief }> {
+    const day = date ?? scheduledBriefDate(new Date());
+    const outcome = await this.runDailyBriefCore(owner, day, "manual");
+    await this.recordDailyBriefAudit(owner, outcome.brief);
+    const { brief } = outcome;
+    let title: string;
+    let body: string;
+    let key: string;
+    if (brief.status === "blocked_config") {
+      title = "Daily brief blocked — configuration needs attention";
+      body = `The daily brief for ${brief.date} is blocked: ${brief.issues.join("; ")}.`;
+      // Stable per issue set, like the monitor blocked_config
+      // alert: re-running while blocked never re-alerts.
+      key = `brief-blocked:${hash(brief.issues.join(";"))}`;
+    } else {
+      title = "Daily brief ready";
+      body =
+        `The daily brief for ${brief.date}: ${brief.finishedCount} finished, ` +
+        `${brief.runningCount} still running, ${brief.needsDecisionCount} needing your decision.` +
+        (brief.slackDeliveryStatus === "delivery_failed"
+          ? " The Slack post failed — the brief is in the app."
+          : "");
+      // One delivery per day: a re-run re-offers the same key and
+      // the store's insertIfAbsent keeps it a single notice.
+      key = `daily-brief:${brief.date}`;
+    }
+    let deliveryStatus: DailyBrief["deliveryStatus"];
+    try {
+      const stored = await this.notify(owner, title, body, undefined, key);
+      deliveryStatus = stored ? "delivered" : "delivery_unverified";
+    } catch {
+      deliveryStatus = "delivery_failed";
+    }
+    const recorded: DailyBrief = { ...brief, deliveryStatus };
+    await this.db.put(owner, DAILY_BRIEF_KIND, recorded);
+    return { brief: recorded };
+  }
+  // The brief for one day (or the latest when no day is given);
+  // null when no run has built one.
+  async dailyBrief(owner: string, date?: string): Promise<DailyBrief | null> {
+    const briefs = await this.db.list<DailyBrief>(owner, DAILY_BRIEF_KIND);
+    if (date) return briefs.find((brief) => brief.date === date) ?? null;
+    return briefs[0] ?? null;
+  }
+  // Recent briefs for this owner, newest first.
+  async dailyBriefs(owner: string, limit = 20): Promise<DailyBrief[]> {
+    const briefs = await this.db.list<DailyBrief>(owner, DAILY_BRIEF_KIND);
+    return briefs.slice(0, Math.max(1, Math.min(100, limit)));
+  }
+  // Ensure the morning scheduled brief job exists: a worker task
+  // (kind "agent", input.dailyBrief) created idempotently under
+  // the key `daily-brief` and parked in `scheduled` with the next
+  // 15:00 UTC nextRunAt, so the existing TaskWorker leases and runs
+  // it — the gamma scheduled-run machinery, not a second scheduler.
+  // Each run returns `scheduled` again with the following morning.
+  async ensureDailyBriefJob(owner: string): Promise<AgentTask> {
+    const task = await this.createTask(
+      owner,
+      {
+        kind: "agent",
+        title: "Daily brief",
+        prompt:
+          "Build the morning brief for the day that just ended: the finished, still-running and needs-decision buckets, the dream diary, lessons violated, and self-review proposals, delivered in-app and to the team Slack channel.",
+        input: { dailyBrief: true },
+      },
+      "daily-brief",
+      true,
+    );
+    if (task.status === "paused" && task.attempts === 0) {
+      const scheduled = await this.db.compareAndSwap<AgentTask>(
+        owner,
+        "tasks",
+        task.id,
+        { status: "paused", attempts: 0 },
+        { status: "scheduled", nextRunAt: nextDailyBriefRunAt(new Date()) },
+      );
+      if (scheduled) return scheduled;
+      return (await this.db.get<AgentTask>(owner, "tasks", task.id)) ?? task;
+    }
+    return task;
+  }
+  // The scheduled run's execution (called from execute()): the same
+  // core pass the manual trigger runs, over the day that just
+  // ended. Outcomes map onto the gamma scheduled-run states:
+  // preflight failure is terminal blocked_config with a stable-
+  // keyed alert; success reschedules for the next morning with the
+  // outcome notice carried in state.notice for the standard
+  // delivery path (publishOutcome -> deliverOutcomeNotice). A Slack
+  // delivery failure does not fold into an incident: the brief
+  // itself — the deliverable — exists in-app either way, so the
+  // failure is recorded on the brief record and named in the
+  // outcome notice instead.
+  private async executeDailyBrief(
+    owner: string,
+    task: AgentTask,
+    context: TaskContext,
+  ): Promise<Partial<AgentTask>> {
+    const day = scheduledBriefDate(new Date());
+    const outcome = await this.runDailyBriefCore(owner, day, "scheduled");
+    await this.recordDailyBriefAudit(owner, outcome.brief);
+    const { brief } = outcome;
+    if (brief.status === "blocked_config") {
+      const detail = `This daily brief job is blocked by its configuration: ${brief.issues.join("; ")}.`;
+      await context.event("error", "Daily brief blocked by configuration", detail);
+      return {
+        status: "blocked_config",
+        error: detail,
+        state: {
+          ...task.state,
+          blockedConfig: true,
+          notice: {
+            title: "Daily brief blocked — configuration needs attention",
+            body: detail,
+            key: `blocked-config:${task.id}:${hash(brief.issues.join(";"))}`,
+          },
+        },
+      };
+    }
+    const nextRunAt = nextDailyBriefRunAt(new Date());
+    const slackNote =
+      brief.slackDeliveryStatus === "delivery_failed"
+        ? " The Slack post failed — the brief is in the app."
+        : brief.slackDeliveryStatus === "not_configured"
+          ? " Slack is not configured, so the brief was delivered in-app only."
+          : "";
+    await context.event(
+      "result",
+      "Daily brief complete",
+      `${brief.finishedCount} finished; ${brief.runningCount} still running; ${brief.needsDecisionCount} needing a decision.`,
+    );
+    return {
+      status: "scheduled",
+      nextRunAt,
+      error: null,
+      result: `Daily brief for ${brief.date} complete.${slackNote}`,
+      state: {
+        ...task.state,
+        failures: 0,
+        incident: null,
+        notice: {
+          title: "Daily brief ready",
+          body:
+            `The daily brief for ${brief.date}: ${brief.finishedCount} finished, ` +
+            `${brief.runningCount} still running, ${brief.needsDecisionCount} needing your decision.${slackNote}`,
+          key: `daily-brief:${brief.date}`,
         },
       },
     };
@@ -1403,6 +1609,11 @@ export class AgentService {
     // the same machinery; it never reaches the model path (the
     // default reviewer is deterministic).
     if (task.input.skillReview === true) return this.executeSkillReview(owner, task, context);
+    // Morning Daily Brief (engine/daily-brief.ts): the scheduled
+    // job is an ordinary worker task flagged by its input, riding
+    // the same machinery; it never reaches the model path (the
+    // brief is computed deterministically from records).
+    if (task.input.dailyBrief === true) return this.executeDailyBrief(owner, task, context);
     if (task.kind === "monitor") {
       // Cron preflight (engine/cron.ts): a scheduled job whose
       // definition no longer validates, whose prerequisites are
