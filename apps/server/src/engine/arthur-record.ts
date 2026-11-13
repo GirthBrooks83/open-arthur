@@ -196,9 +196,12 @@ let cachedSnapshot: ArthurRecordSnapshot | null | undefined;
  * Load and parse the bundled snapshot, once. Candidate paths cover the
  * tsx dev layout (module lives in apps/server/src/engine, asset in
  * apps/server/src/knowledge) and the compiled dist layout (module in
- * dist/apps/server/src/engine, asset still in the source tree, which
- * ships with the deploy). Returns null when no candidate exists — the
- * tool then says so honestly instead of inventing recall.
+ * dist/apps/server/src/engine, asset copied beside it into
+ * dist/apps/server/src/knowledge by build:server — see
+ * scripts/copy-server-assets.mjs; the source tree is NOT guaranteed
+ * to ship with a deploy, so the cwd candidates below are only a
+ * fallback). Returns null when no candidate exists — the tool then
+ * says so honestly instead of inventing recall.
  */
 export function loadArthurRecordSnapshot(): ArthurRecordSnapshot | null {
   if (cachedSnapshot !== undefined) return cachedSnapshot;
