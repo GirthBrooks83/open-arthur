@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import {
   ActivityIndicator,
   Image,
+  type ImageSourcePropType,
   Modal,
   Pressable,
   ScrollView,
@@ -400,13 +401,15 @@ export function LinkRow({
     </Pressable>
   );
 }
-/** OpenMuse's original capybara, shared by every assistant surface. */
+/** Arthur, the default assistant character, shared by every assistant surface. Pass `source` to swap in a different mascot (e.g. the original capybara). */
 export function Mascot({
   size = 42,
   variant = "sky",
+  source = require("../assets/arthur.png"),
 }: {
   size?: number;
   variant?: "sky" | "sand" | "lilac";
+  source?: ImageSourcePropType;
 }) {
   const palette = {
     sky: "#ECF5FA",
@@ -414,7 +417,7 @@ export function Mascot({
     lilac: "#F1ECF9",
   }[variant];
   return (
-    <View accessibilityLabel="OpenMuse capybara" style={{ width: size, height: size }}>
+    <View accessibilityLabel="Arthur" style={{ width: size, height: size }}>
       <View
         style={{
           position: "absolute",
@@ -427,7 +430,7 @@ export function Mascot({
         }}
       />
       <Image
-        source={require("../assets/capybara.png")}
+        source={source}
         resizeMode="contain"
         style={{ width: size, height: size }}
         accessible={false}
