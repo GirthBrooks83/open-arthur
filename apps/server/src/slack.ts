@@ -50,6 +50,12 @@ export interface SlackBridgeDeps {
   now?: () => number;
 }
 
+// The app's session owner (auth.ts mints sessions with this owner id).
+// App tasks — and the Collective Consults recorded on them (PR-iota) —
+// live under it, so consult answers resolve against it no matter which
+// Slack identity posted the reply.
+const APP_OWNER = "local-user";
+
 const SIGNATURE_TOLERANCE_MS = 5 * 60 * 1000;
 const DEDUPE_TTL_MS = 10 * 60 * 1000;
 // Slack message text can run long; keep each post comfortably under the
@@ -161,6 +167,33 @@ export function slackRoutes(config: Config, agent: AgentService, deps: SlackBrid
     }
   };
 
+  // Collective Consult (PR-iota): a reply in the thread of a consult
+  // question the agent posted closes that consult and spawns the
+  // continuation task. This runs BEFORE the actionable gate on purpose:
+  // an answer needs no bot mention, and the answerers (ATLAS, Claude)
+  // may post through app integrations the bot filter would otherwise
+  // drop. Two guards keep it narrow: the bot's own posts never count as
+  // answers, and a reply has an effect only when it matches an OPEN
+  // consult by thread ts — everything else falls through untouched.
+  const consultAnswer = async (payload: SlackEventPayload): Promise<boolean> => {
+    const event = payload.event;
+    if (!event?.thread_ts || !event.channel || !event.ts) return false;
+    if (event.thread_ts === event.ts) return false; // the question itself, not a reply
+    if (config.slackBriefChannel && event.channel !== config.slackBriefChannel) return false;
+    const text = (event.text ?? "").replace(/<@[A-Z0-9]+>/g, "").trim();
+    if (!text) return false;
+    const self = await botUserId();
+    if (self && event.user === self) return false;
+    const answered = await agent.answerConsult(APP_OWNER, event.thread_ts, text);
+    if (!answered) return false;
+    await postMessage({
+      channel: event.channel,
+      threadTs: event.thread_ts,
+      text: "Got it — picked up as a follow-up task.",
+    });
+    return true;
+  };
+
   const runEvent = async (payload: SlackEventPayload, event: SlackInnerEvent) => {
     const team = payload.team_id ?? "unknown";
     const owner = `slack-${team}-${event.user}`;
@@ -263,6 +296,7 @@ export function slackRoutes(config: Config, agent: AgentService, deps: SlackBrid
     // Acknowledge fast; Slack retries anything slower than ~3 seconds.
     void (async () => {
       try {
+        if (await consultAnswer(payload)) return;
         const event = await actionable(payload);
         if (event) await runEvent(payload, event);
       } catch (error) {
@@ -273,6 +307,7 @@ export function slackRoutes(config: Config, agent: AgentService, deps: SlackBrid
   });
   // Test seam: lets the suite drive processing deterministically.
   (app as unknown as { __process: unknown }).__process = async (payload: SlackEventPayload) => {
+    if (await consultAnswer(payload)) return;
     const event = await actionable(payload);
     if (event) await runEvent(payload, event);
   };

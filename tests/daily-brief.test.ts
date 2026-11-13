@@ -465,6 +465,38 @@ test("the Slack poster speaks chat.postMessage with the bot token, by value", as
   assert.equal(await unconfigured.post("hello"), false);
 });
 
+test("the Slack poster's postForTs returns the message ts, by value (PR-iota)", async () => {
+  const poster = new SlackBriefPoster(
+    "xoxb-test",
+    "C123",
+    (async () =>
+      new Response(JSON.stringify({ ok: true, ts: "1794550000.000100" }), {
+        status: 200,
+      })) as typeof fetch,
+  );
+  assert.equal(await poster.postForTs("a consult question"), "1794550000.000100");
+
+  const rejected = new SlackBriefPoster(
+    "xoxb-test",
+    "C123",
+    (async () =>
+      new Response(JSON.stringify({ ok: false, error: "channel_not_found" }), {
+        status: 200,
+      })) as typeof fetch,
+  );
+  assert.equal(await rejected.postForTs("hello"), undefined, "a rejection reports undefined");
+
+  const noTs = new SlackBriefPoster(
+    "xoxb-test",
+    "C123",
+    (async () => new Response(JSON.stringify({ ok: true }), { status: 200 })) as typeof fetch,
+  );
+  assert.equal(await noTs.postForTs("hello"), undefined, "no ts in the response reports undefined");
+
+  const unconfigured = new SlackBriefPoster(undefined, "C123");
+  assert.equal(await unconfigured.postForTs("hello"), undefined);
+});
+
 // --- App-level: manual trigger + scheduled job over HTTP ---
 
 async function makeServer(t: { after: (fn: () => Promise<void>) => void }) {

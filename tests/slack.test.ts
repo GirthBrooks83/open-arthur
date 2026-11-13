@@ -47,8 +47,9 @@ interface StubTask {
   error?: string;
 }
 
-function stubAgent(script: StubTask) {
+function stubAgent(script: StubTask, consult?: { matchesTs: string }) {
   const created: { owner: string; prompt: string; key?: string }[] = [];
+  const consultCalls: { owner: string; postedTs: string; answerText: string }[] = [];
   const agent = {
     async createTask(owner: string, raw: { prompt: string }, key?: string) {
       created.push({ owner, prompt: raw.prompt, key });
@@ -57,8 +58,14 @@ function stubAgent(script: StubTask) {
     async getTask() {
       return { id: "task-1", ...script } as AgentTask;
     },
+    async answerConsult(owner: string, postedTs: string, answerText: string) {
+      consultCalls.push({ owner, postedTs, answerText });
+      if (consult && postedTs === consult.matchesTs)
+        return { consult: { id: "c1" }, continuation: { id: "task-2" } };
+      return undefined;
+    },
   } as unknown as AgentService;
-  return { agent, created };
+  return { agent, created, consultCalls };
 }
 
 function bridge(cfg: Config, agent: AgentService, posts: unknown[], logs: string[]) {
@@ -212,6 +219,62 @@ test("without a bot token the run still happens but the reply is skipped with a 
   await process(mention());
   assert.equal(created.length, 1);
   assert.ok(logs.some((line) => line.includes("SLACK_BOT_TOKEN")));
+});
+
+const threadReply = (overrides: Record<string, unknown> = {}): SlackEventPayload => ({
+  type: "event_callback",
+  event_id: "EvConsult",
+  team_id: "T1",
+  event: {
+    type: "message",
+    user: "UATLAS",
+    channel: "C0CEJ24DUNR",
+    channel_type: "channel",
+    text: "Yes — ship it.",
+    ts: "111.333",
+    thread_ts: "111.222",
+    ...overrides,
+  },
+});
+
+test("a thread reply matching an open consult closes it, with no mention needed (PR-iota)", async () => {
+  const { agent, created, consultCalls } = stubAgent(
+    { status: "succeeded" },
+    { matchesTs: "111.222" },
+  );
+  const posts: { channel: string; threadTs?: string; text: string }[] = [];
+  const app = bridge(config({ slackBriefChannel: "C0CEJ24DUNR" }), agent, posts, []);
+  const process = (app as unknown as { __process: (p: SlackEventPayload) => Promise<void> })
+    .__process;
+  await process(threadReply());
+  assert.deepEqual(consultCalls, [
+    { owner: "local-user", postedTs: "111.222", answerText: "Yes — ship it." },
+  ]);
+  assert.equal(created.length, 0, "no Slack-identity task is created for a consult answer");
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0]?.threadTs, "111.222");
+  assert.match(posts[0]?.text ?? "", /follow-up task/);
+});
+
+test("a thread reply matching no consult falls through to the normal flow (PR-iota)", async () => {
+  const { agent, created, consultCalls } = stubAgent({ status: "succeeded", result: "hi" });
+  const posts: unknown[] = [];
+  const app = bridge(config({ slackBriefChannel: "C0CEJ24DUNR" }), agent, posts, []);
+  const process = (app as unknown as { __process: (p: SlackEventPayload) => Promise<void> })
+    .__process;
+  await process(threadReply());
+  assert.equal(consultCalls.length, 1, "the consult matcher was consulted");
+  assert.equal(created.length, 0, "an unmentioned channel reply still runs no task");
+  assert.equal(posts.length, 0, "no acknowledgement is posted for a non-answer");
+});
+
+test("the bot's own thread replies never count as consult answers (PR-iota)", async () => {
+  const { agent, consultCalls } = stubAgent({ status: "succeeded" }, { matchesTs: "111.222" });
+  const app = bridge(config({ slackBriefChannel: "C0CEJ24DUNR" }), agent, [], []);
+  const process = (app as unknown as { __process: (p: SlackEventPayload) => Promise<void> })
+    .__process;
+  await process(threadReply({ user: BOT_ID }));
+  assert.equal(consultCalls.length, 0);
 });
 
 test("chunkSlackText bounds chunk size and count", () => {
