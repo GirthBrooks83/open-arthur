@@ -39,6 +39,22 @@ before(async () => {
     '<!doctype html><title>OpenMuse</title><div id="root"></div>',
   );
   await writeFile(join(webDir, "_expo", "app.js"), "console.log('openmuse');");
+  await writeFile(
+    join(webDir, "manifest.json"),
+    JSON.stringify({
+      name: "Open Arthur",
+      short_name: "Open Arthur",
+      start_url: "/",
+      scope: "/",
+      display: "standalone",
+      background_color: "#FCFCFC",
+      theme_color: "#FCFCFC",
+      icons: [
+        { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+        { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+      ],
+    }),
+  );
   db = await createStore();
   ({ app } = await createApp(db, config(webDir)));
   dbBare = await createStore();
@@ -62,6 +78,20 @@ test("web assets are served with their content type", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /javascript/);
   assert.match(await response.text(), /openmuse/);
+});
+
+test("the web app manifest is served as JSON, not the SPA page", async () => {
+  const response = await app.request("/manifest.json");
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /application\/json/);
+  const manifest = await response.json();
+  // The fields Chrome requires before it offers a true "Install app".
+  assert.equal(manifest.name, "Open Arthur");
+  assert.equal(manifest.short_name, "Open Arthur");
+  assert.equal(manifest.start_url, "/");
+  assert.equal(manifest.display, "standalone");
+  const sizes = manifest.icons.map((icon: { sizes: string }) => icon.sizes);
+  assert.ok(sizes.includes("192x192") && sizes.includes("512x512"));
 });
 
 test("unknown non-API paths fall back to the app entry (SPA routing)", async () => {

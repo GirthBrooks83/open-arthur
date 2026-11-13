@@ -1,0 +1,22 @@
+{
+  "background_color": "#FCFCFC",
+  "description": "Open Arthur — a little room for everything",
+  "display": "standalone",
+  "icons": [
+    { "purpose": "any", "sizes": "192x192", "src": "/icons/icon-192.png", "type": "image/png" },
+    { "purpose": "any", "sizes": "512x512", "src": "/icons/icon-512.png", "type": "image/png" },
+    {
+      "purpose": "maskable",
+      "sizes": "512x512",
+      "src": "/icons/icon-maskable-512.png",
+      "type": "image/png"
+    }
+  ],
+  "lang": "en",
+  "name": "Open Arthur",
+  "orientation": "portrait",
+  "scope": "/",
+  "short_name": "Open Arthur",
+  "start_url": "/",
+  "theme_color": "#FCFCFC"
+}
