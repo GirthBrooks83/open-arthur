@@ -8,6 +8,7 @@ import type {
 } from "../../../../packages/domain/src/agent.ts";
 import { AppError } from "../errors.ts";
 import type { AgentService } from "./service.ts";
+import { skillManageOpSchema } from "./skills.ts";
 
 const text = z.string().trim().min(1).max(4000);
 const memorySchema = z.object({ text, source: z.string().trim().min(1).max(200).optional() });
@@ -161,6 +162,62 @@ export function agentRoutes(service: AgentService): Hono<{ Variables: { owner: s
       .object({ limit: z.coerce.number().int().min(1).max(100).default(20) })
       .parse({ limit: c.req.query("limit") });
     return c.json(await service.distillationRuns(c.get("owner"), limit));
+  });
+  // Skill machinery + background review (engine/skills.ts,
+  // engine/skill-review.ts): the read surfaces expose the 3
+  // disclosure levels (summaries, full SKILL.md, one references/
+  // file); skill_manage applies a direct write for a caller with
+  // standing access; the review's writes NEVER apply directly —
+  // they stage in the pending area and move only through the
+  // approve/reject decisions below.
+  app.get("/skills", async (c) => c.json(await service.listSkillSummaries(c.get("owner"))));
+  // The pending/review routes are registered BEFORE /skills/:name:
+  // Hono matches in registration order, and ":name" would otherwise
+  // swallow the literal "pending" and "review" segments.
+  const skillReviewDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "date must be YYYY-MM-DD");
+  app.get("/skills/pending", async (c) => {
+    const pendingOnly = c.req.query("status") !== "all";
+    return c.json(await service.pendingSkillWrites(c.get("owner"), pendingOnly));
+  });
+  app.post("/skills/pending/:id/approve", async (c) =>
+    c.json(await service.approveSkillWrite(c.get("owner"), c.req.param("id"))),
+  );
+  app.post("/skills/pending/:id/reject", async (c) =>
+    c.json(await service.rejectSkillWrite(c.get("owner"), c.req.param("id"))),
+  );
+  app.post("/skills/review/run", async (c) => {
+    const raw = await c.req.text();
+    const body = z
+      .object({ date: skillReviewDateSchema.optional() })
+      .parse(raw ? JSON.parse(raw) : {});
+    return c.json(await service.runSkillReview(c.get("owner"), body.date));
+  });
+  app.post("/skills/review/schedule", async (c) =>
+    c.json(await service.ensureSkillReviewJob(c.get("owner")), 201),
+  );
+  app.get("/skills/review/runs", async (c) => {
+    const { limit } = z
+      .object({ limit: z.coerce.number().int().min(1).max(100).default(20) })
+      .parse({ limit: c.req.query("limit") });
+    return c.json(await service.skillReviewRuns(c.get("owner"), limit));
+  });
+  app.get("/skills/:name", async (c) => {
+    const markdown = await service.readSkill(c.get("owner"), c.req.param("name"));
+    if (markdown === null) throw new AppError("Skill not found", 404);
+    return c.json({ name: c.req.param("name"), markdown });
+  });
+  app.get("/skills/:name/files/:path{.+}", async (c) => {
+    const content = await service.readSkillReference(
+      c.get("owner"),
+      c.req.param("name"),
+      c.req.param("path"),
+    );
+    if (content === null) throw new AppError("Skill file not found", 404);
+    return c.json({ name: c.req.param("name"), path: c.req.param("path"), content });
+  });
+  app.post("/skills/manage", async (c) => {
+    const body = await c.req.json();
+    return c.json(await service.skillManage(c.get("owner"), skillManageOpSchema.parse(body)), 201);
   });
   // Content-free audit log (engine/audit.ts): recent lifecycle
   // events for this owner, newest first. Events carry counts only
