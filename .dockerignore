@@ -1,0 +1,11 @@
+.git
+node_modules
+**/node_modules
+dist
+**/dist
+apps/mobile/dist
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore
