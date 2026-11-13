@@ -40,6 +40,11 @@ export interface Config {
   // multi-step loop still lets a task produce as much as it needs across
   // calls.
   maxOutputTokens?: number;
+  // Brain Router (PR-theta): daily cap on google-family model starts,
+  // BRAIN_GOOGLE_DAILY_BUDGET. The Gemini free tier allows ~20 requests
+  // a day; the router degrades deep task classes to the fast family
+  // before that cap can hard-stop a run. Unset = router default (15).
+  brainGoogleDailyBudget?: number;
   agentBackend: "sample" | "model" | "agui";
   agentUrl?: string;
   agentToken?: string;
@@ -131,6 +136,27 @@ export function parseMaxOutputTokens(raw: string | undefined): number | undefine
   return undefined;
 }
 
+let warnedInvalidBrainBudget = false;
+
+// BRAIN_GOOGLE_DAILY_BUDGET: same contract as MODEL_MAX_OUTPUT_TOKENS —
+// a positive integer or it is ignored (router default applies), warned
+// about once.
+export function parseBrainGoogleDailyBudget(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const value = Number(trimmed);
+    if (Number.isSafeInteger(value) && value > 0) return value;
+  }
+  if (!warnedInvalidBrainBudget) {
+    warnedInvalidBrainBudget = true;
+    console.warn(
+      `BRAIN_GOOGLE_DAILY_BUDGET=${JSON.stringify(raw)} is not a positive integer; ignoring it (Brain Router default applies).`,
+    );
+  }
+  return undefined;
+}
+
 export function readConfig(): Config {
   const mode = process.env.WORKSPACE_MODE ?? "sample";
   if (mode !== "sample" && mode !== "live")
@@ -159,6 +185,7 @@ export function readConfig(): Config {
     fallbackModel: process.env.MODEL_FALLBACK,
     fallbackModel2: process.env.MODEL_FALLBACK_2,
     maxOutputTokens: parseMaxOutputTokens(process.env.MODEL_MAX_OUTPUT_TOKENS),
+    brainGoogleDailyBudget: parseBrainGoogleDailyBudget(process.env.BRAIN_GOOGLE_DAILY_BUDGET),
     agentBackend: backend,
     agentUrl: process.env.AGENT_URL,
     agentToken: process.env.AGENT_TOKEN,
