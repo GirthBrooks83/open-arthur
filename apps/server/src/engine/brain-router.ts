@@ -54,15 +54,7 @@ const CLASS_KEYWORDS: ReadonlyArray<readonly [TaskClass, readonly string[]]> = [
   ],
   [
     "architecture",
-    [
-      "architect",
-      "security",
-      "threat",
-      "schema",
-      "migration",
-      "auth design",
-      "data model",
-    ],
+    ["architect", "security", "threat", "schema", "migration", "auth design", "data model"],
   ],
   [
     "research",
@@ -78,10 +70,7 @@ const CLASS_KEYWORDS: ReadonlyArray<readonly [TaskClass, readonly string[]]> = [
       "which is better",
     ],
   ],
-  [
-    "strategy",
-    ["strategy", "roadmap", "priorit", "trade-off", "tradeoff", "decide whether"],
-  ],
+  ["strategy", ["strategy", "roadmap", "priorit", "trade-off", "tradeoff", "decide whether"]],
   ["multimodal", ["image", "screenshot", "photo", "video", "audio", "diagram"]],
 ];
 

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  type BrainBudget,
   classifyTaskText,
   DailyGoogleBudget,
   modelFamily,
   routeModels,
-  type BrainBudget,
 } from "../apps/server/src/engine/brain-router.ts";
 
 const CHAIN = ["openai/qwen/qwen3.8-27b", "google/gemini-3.5-flash"] as const;
@@ -23,11 +23,17 @@ describe("classifyTaskText", () => {
   });
 
   it("classifies architecture and security work", () => {
-    assert.equal(classifyTaskText("Review the security threat model for the schema migration"), "architecture");
+    assert.equal(
+      classifyTaskText("Review the security threat model for the schema migration"),
+      "architecture",
+    );
   });
 
   it("classifies strategy work", () => {
-    assert.equal(classifyTaskText("Draft the roadmap and decide whether to prioritise shipping"), "strategy");
+    assert.equal(
+      classifyTaskText("Draft the roadmap and decide whether to prioritise shipping"),
+      "strategy",
+    );
   });
 
   it("classifies multimodal work", () => {

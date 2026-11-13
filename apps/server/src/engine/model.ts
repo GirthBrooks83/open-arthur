@@ -7,6 +7,7 @@ import type { AgentTask } from "../../../../packages/domain/src/agent.ts";
 import { emailDraftSchema, eventDraftSchema } from "../../../../packages/domain/src/index.ts";
 import { modelCallOptions, modelProviderKeyPresent } from "../agent-config.ts";
 import { computerInstructions, computerTools } from "../computer-tools.ts";
+import { classifyTaskText, googleDailyBudget, modelFamily, routeModels } from "./brain-router.ts";
 import {
   allProvidersExhaustedMessage,
   buildProviderChain,
@@ -14,12 +15,6 @@ import {
   type ProviderFailure,
   rateLimitDelayMs,
 } from "./rate-limit.ts";
-import {
-  classifyTaskText,
-  googleDailyBudget,
-  modelFamily,
-  routeModels,
-} from "./brain-router.ts";
 import type { AgentService } from "./service.ts";
 import { skillManageOpSchema } from "./skills.ts";
 import type { TaskContext } from "./worker.ts";
