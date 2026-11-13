@@ -107,7 +107,7 @@ import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
 // Tools whose success makes a completion a WRITE task for the
 // Verifier stage: the run saved or changed something durable, so its
 // completion is checked before it ships (see applyVerifierSpine).
-const MUTATING_TOOLS = new Set(["save_memory", "save_artifact", "fill_pdf", "skill_manage"]);
+export const MUTATING_TOOLS = new Set(["save_memory", "save_artifact", "fill_pdf", "skill_manage"]);
 
 // Bounded auto-continue (ATLAS audit 2026-11-06, Priority 1): the
 // follow-up instruction the service itself issues — through the same
