@@ -66,6 +66,11 @@ export interface Config {
   // never acts or posts. See apps/server/src/slack.ts.
   slackBotToken?: string;
   slackSigningSecret?: string;
+  // Channel the Daily Brief posts to (the #team-arthur channel id),
+  // posted with the bridge's bot token. Unset means the brief is
+  // delivered in-app only and records that honestly on the brief
+  // record. See engine/daily-brief.ts.
+  slackBriefChannel?: string;
   googleClientId?: string;
   googleClientSecret?: string;
   googleRedirectUri: string;
@@ -170,6 +175,7 @@ export function readConfig(): Config {
     },
     slackBotToken: process.env.SLACK_BOT_TOKEN,
     slackSigningSecret: process.env.SLACK_SIGNING_SECRET,
+    slackBriefChannel: process.env.SLACK_BRIEF_CHANNEL,
     googleClientId: process.env.GOOGLE_CLIENT_ID,
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
     googleRedirectUri: `${publicUrl}/api/google/callback`,
