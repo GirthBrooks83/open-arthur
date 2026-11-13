@@ -8,6 +8,7 @@ import { emailDraftSchema, eventDraftSchema } from "../../../../packages/domain/
 import { modelCallOptions, modelProviderKeyPresent } from "../agent-config.ts";
 import { computerInstructions, computerTools } from "../computer-tools.ts";
 import { classifyTaskText, googleDailyBudget, modelFamily, routeModels } from "./brain-router.ts";
+import { type ConsultRecord, findOpenConsult, openConsult } from "./consults.ts";
 import {
   allProvidersExhaustedMessage,
   buildProviderChain,
@@ -89,6 +90,7 @@ export async function executeModelTask(
     "prepare_email",
     "prepare_event",
     "set_plan",
+    "consult_team",
   ]);
   const checkpoint = async () => {
     task = await ctx.checkpoint({ state: { ...task.state, operations } });
@@ -288,6 +290,55 @@ export async function executeModelTask(
         if (args.action === "patch") await service.readSkill(owner, args.name);
         const result = await service.skillManage(owner, args, "agent");
         return result;
+      },
+    ),
+    tool(
+      "consult_team",
+      "Ask ATLAS, Claude or the whole team a question in the team Slack channel and keep working — the answer arrives later as a follow-up task, so never wait for it inside this run. Use for architecture, security, strategy or research questions where a second brain materially helps. One open consult per task.",
+      z.object({
+        question: z.string().min(10).max(2000),
+        audience: z.enum(["atlas", "claude", "team"]).default("team"),
+      }),
+      async (args) => {
+        const existing = Array.isArray(task.state.consults)
+          ? (task.state.consults as ConsultRecord[])
+          : [];
+        if (findOpenConsult(existing, task.id))
+          return {
+            error:
+              "This task already has an open consult. Continue the work; the answer will arrive as a follow-up task.",
+          };
+        const label =
+          args.audience === "atlas" ? "ATLAS" : args.audience === "claude" ? "Claude" : "Team";
+        const postedTs = await service.briefSlack.postForTs(
+          `🧵 Consult from Open Arthur (task ${task.id})\nFor: ${label}\n\n${args.question}\n\nReply in this thread — the answer is picked up automatically as a follow-up task.`,
+        );
+        if (!postedTs)
+          return {
+            error:
+              "Slack is not configured or the post failed, so no consult was recorded. Continue without it, or tell the user the team channel is unreachable.",
+          };
+        const opened = openConsult(existing, {
+          id: randomUUID(),
+          taskId: task.id,
+          question: args.question,
+          audience: args.audience,
+          channel: service.config.slackBriefChannel ?? "",
+          postedTs,
+          createdAt: new Date().toISOString(),
+        });
+        if (!opened.consult) return { error: opened.error ?? "Could not record the consult" };
+        task = await ctx.checkpoint({ state: { ...task.state, consults: opened.consults } });
+        await ctx.event(
+          "step",
+          "Team consult posted",
+          `Asked ${label} in the team channel; the answer will arrive as a follow-up task.`,
+        );
+        return {
+          consultId: opened.consult.id,
+          status: "open",
+          note: "Posted to the team channel. Continue this task without waiting — the answer arrives as a follow-up task.",
+        };
       },
     ),
     tool(

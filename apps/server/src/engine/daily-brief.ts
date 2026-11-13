@@ -60,6 +60,7 @@ import { z } from "zod";
 import type { AgentTask } from "../../../../packages/domain/src/agent.ts";
 import type { Config } from "../config.ts";
 import type { Store } from "../db.ts";
+import { type ConsultRecord, staleConsults } from "./consults.ts";
 import { type DeliveryStatus, deliveryStatusSchema } from "./cron.ts";
 import {
   DISTILLATION_RUN_KIND,
@@ -167,6 +168,32 @@ export class SlackBriefPoster implements DailyBriefSlack {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Post ONE message and return its Slack ts (PR-iota: a consult matches
+   * thread replies by the question's ts). No chunking — callers cap the
+   * text under Slack's limit. By value like post(): undefined when
+   * unconfigured, rejected, or the response carries no ts.
+   */
+  async postForTs(text: string): Promise<string | undefined> {
+    if (!this.token || !this.channel) return undefined;
+    try {
+      const response = await this.fetchFn("https://slack.com/api/chat.postMessage", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          Authorization: `Bearer ${this.token}`,
+        },
+        body: JSON.stringify({ channel: this.channel, text }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!response.ok || data.ok !== true || typeof data.ts !== "string") return undefined;
+      return data.ts;
+    } catch {
+      return undefined;
     }
   }
 }
@@ -373,6 +400,28 @@ export function deriveSkillDecisionItems(pending: PendingSkillWrite[]): BriefIte
       status: "pending_skill_write",
       detail: excerpt(entry.rationale),
     }));
+}
+
+// Team consults (PR-iota) still open past the staleness threshold,
+// shaped as needs-decision items: the team has not answered, and only
+// the operator can chase the answer or write the question off. The
+// brief only surfaces them; answering happens in Slack.
+export function deriveStaleConsultItems(consults: ConsultRecord[], now: Date): BriefItem[] {
+  return staleConsults(consults, now).map((consult) => {
+    const days = Math.floor((now.getTime() - Date.parse(consult.createdAt)) / 86_400_000);
+    const audience =
+      consult.audience === "atlas"
+        ? "ATLAS"
+        : consult.audience === "claude"
+          ? "Claude"
+          : "the team";
+    return {
+      taskId: consult.taskId,
+      title: `Team consult unanswered for ${days} day${days === 1 ? "" : "s"} — asked ${audience}`,
+      status: "open_consult",
+      detail: excerpt(consult.question),
+    };
+  });
 }
 
 // The lessons the verifier spine (PR-alpha) can prove were broken,
@@ -665,6 +714,14 @@ export async function runDailyBriefPass(input: {
   // operator owes, exactly like a waiting task.
   const pendingWrites = await listPendingSkillWrites(input.db, input.owner, true);
   buckets.needsDecision = [...buckets.needsDecision, ...deriveSkillDecisionItems(pendingWrites)];
+  // ... and team consults (PR-iota) the team has left unanswered past
+  // the staleness threshold, read off the same task list (consults live
+  // on task state): also decisions the operator owes.
+  const consults = tasks.flatMap((task) => {
+    const raw = task.state?.consults;
+    return Array.isArray(raw) ? (raw as ConsultRecord[]) : [];
+  });
+  buckets.needsDecision = [...buckets.needsDecision, ...deriveStaleConsultItems(consults, now)];
   const lessonsViolated = deriveLessonsViolated(tasks, window);
   const diary = await input.db.get<DreamDiary>(input.owner, DREAM_DIARY_KIND, input.date);
   const distillationRuns = await input.db.list<DistillationRun>(input.owner, DISTILLATION_RUN_KIND);
