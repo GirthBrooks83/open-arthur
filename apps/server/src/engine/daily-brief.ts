@@ -60,6 +60,7 @@ import { z } from "zod";
 import type { AgentTask } from "../../../../packages/domain/src/agent.ts";
 import type { Config } from "../config.ts";
 import type { Store } from "../db.ts";
+import { modelFamily } from "./brain-router.ts";
 import { type ConsultRecord, staleConsults } from "./consults.ts";
 import { type DeliveryStatus, deliveryStatusSchema } from "./cron.ts";
 import {
@@ -424,6 +425,52 @@ export function deriveStaleConsultItems(consults: ConsultRecord[], now: Date): B
   });
 }
 
+// The brief's one-line model-usage summary (PR-kappa, Joseph's ask
+// 2026-11-13): derived from the Brain Router decisions recorded on
+// the window's tasks (state.brainRouting, PR-theta). Counts are of
+// routing DECISIONS — the model each task started on — grouped by
+// task class and by family; google-family starts are the budget-
+// relevant number (the router also records failovers against the
+// budget live, but those are not in the durable record, so the line
+// says "starts" and nothing stronger). Null when no task in the
+// window carries a routing record.
+export function deriveUsageLine(
+  tasks: AgentTask[],
+  window: { start: string; end: string },
+  googleDailyCap = 15,
+): string | null {
+  const routed = tasks.filter((task) => {
+    if (task.updatedAt < window.start || task.updatedAt >= window.end) return false;
+    const routing = (task.state as Record<string, unknown> | undefined)?.brainRouting;
+    return routing !== null && typeof routing === "object";
+  });
+  if (!routed.length) return null;
+  const byClass = new Map<string, number>();
+  let googleStarts = 0;
+  for (const task of routed) {
+    const routing = (task.state as Record<string, unknown>).brainRouting as {
+      taskClass?: unknown;
+      startModel?: unknown;
+    };
+    const taskClass = typeof routing.taskClass === "string" ? routing.taskClass : "unknown";
+    byClass.set(taskClass, (byClass.get(taskClass) ?? 0) + 1);
+    if (
+      modelFamily(typeof routing.startModel === "string" ? routing.startModel : undefined) ===
+      "google"
+    )
+      googleStarts += 1;
+  }
+  const classes = [...byClass.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name, count]) => `${name} ${count}`)
+    .join(", ");
+  const fastStarts = routed.length - googleStarts;
+  return (
+    `${routed.length} task${routed.length === 1 ? "" : "s"} routed (${classes}) · ` +
+    `fast brain starts ${fastStarts} · deep brain (Google) starts ${googleStarts} of ${googleDailyCap} daily budget`
+  );
+}
+
 // The lessons the verifier spine (PR-alpha) can prove were broken,
 // keyed stably so a lesson's count is comparable day over day. The
 // descriptions are the behavioural rules themselves (the LESSONS.md
@@ -565,6 +612,7 @@ export function buildBriefMarkdown(input: {
   diaryMarkdown: string | null;
   lessonsViolated: BriefLesson[];
   selfReviewProposals: BriefProposal[];
+  usageLine?: string | null;
 }): string {
   const lines = [
     `# Daily Brief: ${input.date}`,
@@ -572,6 +620,7 @@ export function buildBriefMarkdown(input: {
     ...bucketSection("Finished", input.finished, input.finishedCount),
     ...bucketSection("Still running", input.running, input.runningCount),
     ...bucketSection("Needs your decision", input.needsDecision, input.needsDecisionCount),
+    ...(input.usageLine ? ["## Model usage", "", `- ${input.usageLine}`, ""] : []),
     "## From the dream diary",
     "",
     ...(input.diaryMarkdown
@@ -610,6 +659,7 @@ export function buildBriefSlackText(input: {
   diaryMarkdown: string | null;
   lessonsViolated: BriefLesson[];
   selfReviewProposals: BriefProposal[];
+  usageLine?: string | null;
 }): string {
   const titles = (items: BriefItem[], count: number): string[] => {
     const lines = items.slice(0, 5).map((item) => `• ${item.title} (${item.status})`);
@@ -619,6 +669,7 @@ export function buildBriefSlackText(input: {
   const lines = [
     `*Daily Brief — ${input.date}*`,
     `Finished: ${input.finishedCount} · Still running: ${input.runningCount} · Needs your decision: ${input.needsDecisionCount}`,
+    ...(input.usageLine ? [`Model usage: ${input.usageLine}`] : []),
     "",
     "*Finished*",
     ...titles(input.finished, input.finishedCount),
@@ -672,6 +723,7 @@ export async function runDailyBriefPass(input: {
   date: string;
   trigger: "manual" | "scheduled";
   now?: Date;
+  googleDailyCap?: number;
 }): Promise<DailyBriefOutcome> {
   const now = input.now ?? new Date();
   const base = {
@@ -750,6 +802,7 @@ export async function runDailyBriefPass(input: {
     diaryMarkdown: diary?.markdown ?? null,
     lessonsViolated,
     selfReviewProposals,
+    usageLine: deriveUsageLine(tasks, window, input.googleDailyCap),
   };
   const markdown = buildBriefMarkdown(content);
 
