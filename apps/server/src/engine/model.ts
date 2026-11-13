@@ -7,6 +7,11 @@ import type { AgentTask } from "../../../../packages/domain/src/agent.ts";
 import { emailDraftSchema, eventDraftSchema } from "../../../../packages/domain/src/index.ts";
 import { modelCallOptions, modelProviderKeyPresent } from "../agent-config.ts";
 import { computerInstructions, computerTools } from "../computer-tools.ts";
+import {
+  ARTHUR_RECORD_TOOL_NAME,
+  loadArthurRecordSnapshot,
+  recallArthurRecord,
+} from "./arthur-record.ts";
 import { classifyTaskText, googleDailyBudget, modelFamily, routeModels } from "./brain-router.ts";
 import { type ConsultRecord, findOpenConsult, openConsult } from "./consults.ts";
 import {
@@ -339,6 +344,20 @@ export async function executeModelTask(
           status: "open",
           note: "Posted to the team channel. Continue this task without waiting — the answer arrives as a follow-up task.",
         };
+      },
+    ),
+    tool(
+      ARTHUR_RECORD_TOOL_NAME,
+      "Recall Arthur's curated sync record — what Arthur (the original, on the user's main setup) has learned and decided: which integration lanes are on, approved or locked off, the wiring order, and the permanent operating rules. Use it before proposing a lane, tool or approach, so settled decisions are not re-litigated. Read-only. The record is a bundled snapshot, not a live sync, and every result carries its snapshot date.",
+      z.object({ query: z.string().min(2).max(500) }),
+      async ({ query }) => {
+        const snapshot = loadArthurRecordSnapshot();
+        if (!snapshot)
+          return {
+            error:
+              "Arthur's synced record snapshot is not bundled on this server, so there is nothing to recall. Say so plainly rather than guessing.",
+          };
+        return recallArthurRecord(snapshot, query);
       },
     ),
     tool(
