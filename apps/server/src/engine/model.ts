@@ -15,6 +15,7 @@ import {
   rateLimitDelayMs,
 } from "./rate-limit.ts";
 import type { AgentService } from "./service.ts";
+import { skillManageOpSchema } from "./skills.ts";
 import type { TaskContext } from "./worker.ts";
 
 // Truncation visibility (ATLAS audit 2026-11-06, Priority 1): a model
@@ -277,6 +278,16 @@ export async function executeModelTask(
           );
           return { saved: true, id: memory.id, text: memory.text };
         }),
+    ),
+    tool(
+      "skill_manage",
+      "Create, patch or add a references file to a reusable skill (SKILL.md playbook). One action per call; each action accepts only its own fields. Patch is preferred for updates and requires reading the skill first (use the skills routes to read it). Linter warnings in the result are advisory.",
+      skillManageOpSchema,
+      async (args) => {
+        if (args.action === "patch") await service.readSkill(owner, args.name);
+        const result = await service.skillManage(owner, args, "agent");
+        return result;
+      },
     ),
     tool(
       "save_artifact",

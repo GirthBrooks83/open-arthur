@@ -59,6 +59,28 @@ import { type HindsightLane, hindsightLaneFor } from "./hindsight.ts";
 import { type Mem0Lane, mem0LaneFor } from "./mem0.ts";
 import { executeModelTask, UNCONFIRMED_RUN_QUESTION } from "./model.ts";
 import {
+  approvePendingSkillWrite,
+  listPendingSkillWrites,
+  nextSkillReviewRunAt,
+  type PendingSkillWrite,
+  rejectPendingSkillWrite,
+  runSkillReviewPass,
+  SKILL_REVIEW_RUN_KIND,
+  type SkillReviewer,
+  type SkillReviewOutcome,
+  type SkillReviewRun,
+  scheduledSkillReviewDate,
+} from "./skill-review.ts";
+import {
+  applySkillManage,
+  listSkills,
+  readSkillFile,
+  readSkillMarkdown,
+  type SkillManageOp,
+  type SkillManageResult,
+  type SkillSummary,
+} from "./skills.ts";
+import {
   citedIds,
   createPlan,
   critiqueAnswer,
@@ -74,7 +96,7 @@ import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
 // Tools whose success makes a completion a WRITE task for the
 // Verifier stage: the run saved or changed something durable, so its
 // completion is checked before it ships (see applyVerifierSpine).
-const MUTATING_TOOLS = new Set(["save_memory", "save_artifact", "fill_pdf"]);
+const MUTATING_TOOLS = new Set(["save_memory", "save_artifact", "fill_pdf", "skill_manage"]);
 
 // Bounded auto-continue (ATLAS audit 2026-11-06, Priority 1): the
 // follow-up instruction the service itself issues — through the same
@@ -399,6 +421,271 @@ export class AgentService {
           title: "Dream diary ready",
           body: `Distillation for ${run.date} settled ${run.settled} new fact(s) into Mem0 and flagged ${run.supersessionCandidates} supersession candidate(s).`,
           key: `dream-diary:${run.date}`,
+        },
+      },
+    };
+  }
+  // --- Skill machinery + background review (engine/skills.ts,
+  // engine/skill-review.ts, PR-epsilon) ---
+  // The direct skill_manage path: a caller with standing write
+  // access (a live task's tool, an operator action) applies ops
+  // straight to the skill store. The service keeps a per-owner
+  // read log so patch's read-before-write rule has a session to
+  // check: a read through this service marks the skill read, and a
+  // direct patch consumes a function that only answers after such a
+  // read — and only with the exact text that was read, so a stale
+  // read fails in the machinery, not silently.
+  private readonly skillReads = new Map<string, Map<string, string>>();
+  private markSkillRead(owner: string, name: string, markdown: string): void {
+    const reads = this.skillReads.get(owner) ?? new Map<string, string>();
+    reads.set(name, markdown);
+    this.skillReads.set(owner, reads);
+  }
+  async listSkillSummaries(owner: string): Promise<SkillSummary[]> {
+    return listSkills(this.db, owner);
+  }
+  async readSkill(owner: string, name: string): Promise<string | null> {
+    const markdown = await readSkillMarkdown(this.db, owner, name);
+    if (markdown !== null) this.markSkillRead(owner, name, markdown);
+    return markdown;
+  }
+  async readSkillReference(owner: string, name: string, path: string): Promise<string | null> {
+    return readSkillFile(this.db, owner, name, path);
+  }
+  async skillManage(
+    owner: string,
+    op: SkillManageOp,
+    createdBy: "agent" | "operator" = "operator",
+  ): Promise<SkillManageResult> {
+    const reads = this.skillReads.get(owner);
+    const result = await applySkillManage(this.db, owner, op, {
+      createdBy,
+      readSkill: async (name) => reads?.get(name) ?? null,
+    });
+    // A successful write changes the text any earlier read saw;
+    // refresh the read log to the new current text so a follow-up
+    // patch in the same session patches against what it just wrote.
+    const current = await readSkillMarkdown(this.db, owner, op.name);
+    if (current !== null) this.markSkillRead(owner, op.name, current);
+    const counts = { skills: 1, warnings: result.warnings.length };
+    if (op.action === "create") await this.recordAudit(owner, "skill.created", "succeeded", counts);
+    else if (op.action === "patch")
+      await this.recordAudit(owner, "skill.patched", "succeeded", counts);
+    else await this.recordAudit(owner, "skill.file_written", "succeeded", counts);
+    return result;
+  }
+  // The background review: core pass + audit + (manual path) the
+  // outcome notice with gamma delivery semantics, mirroring
+  // runDistillation. The reviewer seam is injectable for tests; the
+  // production default is deterministic and makes no model call.
+  private async recordSkillReviewAudit(owner: string, run: SkillReviewRun): Promise<void> {
+    const counts = {
+      runs: 1,
+      reviewed: run.tasksReviewed,
+      proposals: run.proposals,
+      creates: run.creates,
+      patches: run.patches,
+      files: run.files,
+      skipped: run.skipped,
+    };
+    if (run.status === "succeeded")
+      await this.recordAudit(owner, "skill_review.completed", "succeeded", counts);
+    else if (run.status === "partial")
+      await this.recordAudit(owner, "skill_review.partial", "failed", counts);
+    else await this.recordAudit(owner, "skill_review.blocked_config", "denied", counts);
+  }
+  async runSkillReview(
+    owner: string,
+    date?: string,
+    reviewer?: SkillReviewer,
+  ): Promise<{ run: SkillReviewRun; pending: PendingSkillWrite[] }> {
+    const day = date ?? new Date().toISOString().slice(0, 10);
+    const outcome: SkillReviewOutcome = await runSkillReviewPass({
+      db: this.db,
+      owner,
+      date: day,
+      trigger: "manual",
+      reviewer,
+    });
+    await this.recordSkillReviewAudit(owner, outcome.run);
+    const { run } = outcome;
+    let title: string;
+    let body: string;
+    let key: string;
+    if (run.status === "blocked_config") {
+      title = "Skill review blocked — configuration needs attention";
+      body = `The nightly skill review for ${run.date} is blocked by its configuration: ${run.issues.join("; ")}.`;
+      key = `skill-review-blocked:${hash(run.issues.join(";"))}`;
+    } else if (run.status === "partial") {
+      title = "Skill review needs attention";
+      body = `The skill review for ${run.date} finished partially: ${run.issues.join("; ")}.`;
+      key = `skill-review-partial:${run.date}:${run.id}`;
+    } else if (run.proposals > 0) {
+      title = "Skill proposals waiting for review";
+      body = `The background review for ${run.date} staged ${run.proposals} skill proposal(s) (${run.creates} new, ${run.patches} patch, ${run.files} file). Nothing applies until approved.`;
+      key = `skill-review:${run.date}:${run.id}`;
+    } else {
+      title = "Skill review complete";
+      body = `The background review for ${run.date} reviewed ${run.tasksReviewed} task(s) and proposed nothing — a quiet day is a correct no-op.`;
+      key = `skill-review:${run.date}:${run.id}`;
+    }
+    let deliveryStatus: SkillReviewRun["deliveryStatus"];
+    try {
+      const stored = await this.notify(owner, title, body, undefined, key);
+      deliveryStatus = stored ? "delivered" : "delivery_unverified";
+    } catch {
+      deliveryStatus = "delivery_failed";
+    }
+    const recorded: SkillReviewRun = { ...run, deliveryStatus };
+    await this.db.put(owner, SKILL_REVIEW_RUN_KIND, recorded);
+    return { run: recorded, pending: outcome.pending };
+  }
+  async skillReviewRuns(owner: string, limit = 20): Promise<SkillReviewRun[]> {
+    const runs = await this.db.list<SkillReviewRun>(owner, SKILL_REVIEW_RUN_KIND);
+    return runs.slice(0, Math.max(1, Math.min(100, limit)));
+  }
+  // The pending area (write-approval ON): the operator's decision
+  // surface. Approving applies the exact staged op with the
+  // review's provenance; rejecting discards it. Both decisions are
+  // audited with counts/ids only — never skill content.
+  async pendingSkillWrites(owner: string, pendingOnly = false): Promise<PendingSkillWrite[]> {
+    return listPendingSkillWrites(this.db, owner, pendingOnly);
+  }
+  async approveSkillWrite(owner: string, id: string): Promise<PendingSkillWrite> {
+    const { pending, result } = await approvePendingSkillWrite(this.db, owner, id);
+    await this.recordAudit(owner, "skill.pending_approved", "succeeded", {
+      writes: 1,
+      warnings: result.warnings.length,
+    });
+    return pending;
+  }
+  async rejectSkillWrite(owner: string, id: string): Promise<PendingSkillWrite> {
+    const pending = await rejectPendingSkillWrite(this.db, owner, id);
+    await this.recordAudit(owner, "skill.pending_rejected", "succeeded", { writes: 1 });
+    return pending;
+  }
+  // Ensure the nightly scheduled review job exists — the same
+  // idempotent worker-task pattern as ensureDistillationJob, flagged
+  // by input.skillReview, parked `scheduled` at the next 03:17 UTC.
+  async ensureSkillReviewJob(owner: string): Promise<AgentTask> {
+    const task = await this.createTask(
+      owner,
+      {
+        kind: "agent",
+        title: "Nightly skill review",
+        prompt:
+          "Review the day's completed task transcripts and propose skill changes only: a new skill when a workflow has succeeded twice, a patch when a failure matches an existing skill's Pitfalls. Proposals land in the pending area and apply only on approval.",
+        input: { skillReview: true },
+      },
+      "skill-review-nightly",
+      true,
+    );
+    if (task.status === "paused" && task.attempts === 0) {
+      const scheduled = await this.db.compareAndSwap<AgentTask>(
+        owner,
+        "tasks",
+        task.id,
+        { status: "paused", attempts: 0 },
+        { status: "scheduled", nextRunAt: nextSkillReviewRunAt(new Date()) },
+      );
+      if (scheduled) return scheduled;
+      return (await this.db.get<AgentTask>(owner, "tasks", task.id)) ?? task;
+    }
+    return task;
+  }
+  // The scheduled run's execution (called from execute()): the same
+  // core pass the manual trigger runs, over the day that just ended.
+  // Outcomes map onto the gamma scheduled-run states exactly as
+  // distillation's do: preflight failure is terminal blocked_config
+  // with a stable-keyed alert; success and partial both reschedule
+  // for the next night, with the outcome notice carried in
+  // state.notice for the standard delivery path, and a partial folds
+  // into the task's incident by normalized signature.
+  private async executeSkillReview(
+    owner: string,
+    task: AgentTask,
+    context: TaskContext,
+  ): Promise<Partial<AgentTask>> {
+    const day = scheduledSkillReviewDate(new Date());
+    const outcome = await runSkillReviewPass({
+      db: this.db,
+      owner,
+      date: day,
+      trigger: "scheduled",
+    });
+    await this.recordSkillReviewAudit(owner, outcome.run);
+    const { run } = outcome;
+    if (run.status === "blocked_config") {
+      const detail = `This skill review job is blocked by its configuration: ${run.issues.join("; ")}. Fix the review window to run it again.`;
+      await context.event("error", "Skill review blocked by configuration", detail);
+      return {
+        status: "blocked_config",
+        error: detail,
+        state: {
+          ...task.state,
+          blockedConfig: true,
+          notice: {
+            title: "Skill review blocked — configuration needs attention",
+            body: detail,
+            key: `blocked-config:${task.id}:${hash(run.issues.join(";"))}`,
+          },
+        },
+      };
+    }
+    const nextRunAt = nextSkillReviewRunAt(new Date());
+    if (run.status === "partial") {
+      await context.event("error", "Skill review finished partially", run.issues.join("; "));
+      const signature = run.failureSignature ?? "skill review failure";
+      const { action, incident } = decideIncident(
+        incidentFromState(task.state.incident),
+        signature,
+        hash(signature).slice(0, 16),
+        Date.now(),
+      );
+      const failures = Number(task.state.failures ?? 0) + 1;
+      return {
+        status: "scheduled",
+        nextRunAt,
+        error: run.issues.join("; "),
+        result: `Skill review for ${run.date} finished partially; staged proposals are unaffected.`,
+        state: {
+          ...task.state,
+          failures,
+          incident,
+          notice:
+            action === "suppress"
+              ? null
+              : {
+                  title: "Skill review needs attention",
+                  body: `The skill review for ${run.date} finished partially: ${run.issues.join("; ")}.`,
+                  key: `skill-review-partial:${task.id}:${incident.hash}:${
+                    action === "remind" ? `remind:${incident.reminders}` : "first"
+                  }:${incident.firstAt}`,
+                },
+        },
+      };
+    }
+    await context.event(
+      "result",
+      "Skill review complete",
+      `Reviewed ${run.tasksReviewed} task(s); ${run.proposals} proposal(s) staged for approval.`,
+    );
+    return {
+      status: "scheduled",
+      nextRunAt,
+      error: null,
+      result: `Skill review for ${run.date} complete. ${run.proposals} proposal(s) staged.`,
+      state: {
+        ...task.state,
+        failures: 0,
+        incident: null,
+        notice: {
+          title: run.proposals > 0 ? "Skill proposals waiting for review" : "Skill review complete",
+          body:
+            run.proposals > 0
+              ? `The background review for ${run.date} staged ${run.proposals} skill proposal(s). Nothing applies until approved.`
+              : `The background review for ${run.date} reviewed ${run.tasksReviewed} task(s) and proposed nothing.`,
+          key: `skill-review:${run.date}:${run.id}`,
         },
       },
     };
@@ -1111,6 +1398,11 @@ export class AgentService {
     // rides the same leasing/settled/delivery machinery as monitors
     // and never reaches the model path (deterministic v1).
     if (task.input.distillation === true) return this.executeDistillation(owner, task, context);
+    // Nightly skill review (engine/skill-review.ts): the scheduled
+    // job is an ordinary worker task flagged by its input, riding
+    // the same machinery; it never reaches the model path (the
+    // default reviewer is deterministic).
+    if (task.input.skillReview === true) return this.executeSkillReview(owner, task, context);
     if (task.kind === "monitor") {
       // Cron preflight (engine/cron.ts): a scheduled job whose
       // definition no longer validates, whose prerequisites are
