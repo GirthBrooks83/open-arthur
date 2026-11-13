@@ -6,11 +6,13 @@ import { test } from "node:test";
 import { createApp } from "../apps/server/src/app.ts";
 import { createStore, type Store } from "../apps/server/src/db.ts";
 import {
+  buildBriefMarkdown,
   chunkBriefText,
   classifyBriefTasks,
   DAILY_BRIEF_KIND,
   type DailyBriefSlack,
   deriveLessonsViolated,
+  deriveUsageLine,
   nextDailyBriefRunAt,
   runDailyBriefPass,
   SlackBriefPoster,
@@ -639,4 +641,84 @@ test("the scheduled daily-brief job rides the worker and reschedules for the nex
   assert.equal(briefs[0].status, "succeeded");
   const audit = await server.agent.auditEvents(appOwner);
   assert.ok(audit.some((event) => event.operation === "brief.completed"));
+});
+
+test("deriveUsageLine summarizes the window's Brain Router decisions (PR-kappa)", () => {
+  const routed = (
+    id: string,
+    taskClass: string,
+    startModel: string,
+    updatedAt = `${DAY}T10:00:00.000Z`,
+  ) =>
+    taskRecord({
+      id,
+      updatedAt,
+      state: { brainRouting: { taskClass, startModel, reason: "test" } },
+    });
+  const line = deriveUsageLine(
+    [
+      routed("a", "routine", "openai/qwen/qwen3.8-27b"),
+      routed("b", "routine", "openai/qwen/qwen3.8-27b"),
+      routed("c", "research", "google/gemini-3.5-flash"),
+      routed("d", "research", "google/gemini-3.5-flash", "2026-11-08T10:00:00.000Z"),
+      taskRecord({ id: "e", updatedAt: `${DAY}T11:00:00.000Z` }),
+    ],
+    WINDOW,
+  );
+  assert.equal(
+    line,
+    "3 tasks routed (routine 2, research 1) · fast brain starts 2 · deep brain (Google) starts 1 of 15 daily budget",
+  );
+  assert.equal(deriveUsageLine([taskRecord({ id: "x" })], WINDOW), null);
+  assert.match(
+    deriveUsageLine([routed("s", "coding", "google/gemini-3.5-flash")], WINDOW, 20) ?? "",
+    /of 20 daily budget/,
+  );
+});
+
+test("the usage line lands in the brief markdown and the Slack text (PR-kappa)", async () => {
+  const db = await createStore();
+  await seedTask(
+    db,
+    taskRecord({
+      id: "routed-1",
+      status: "succeeded",
+      updatedAt: `${DAY}T10:00:00.000Z`,
+      state: {
+        brainRouting: {
+          taskClass: "research",
+          startModel: "google/gemini-3.5-flash",
+          reason: "test",
+        },
+      },
+    }),
+  );
+  const slack = slackDouble();
+  const outcome = await runDailyBriefPass({
+    db,
+    owner,
+    slack,
+    date: DAY,
+    trigger: "manual",
+    now: NOW,
+  });
+  assert.equal(outcome.brief.status, "succeeded");
+  assert.match(
+    outcome.brief.markdown,
+    /## Model usage\n\n- 1 task routed \(research 1\) · fast brain starts 0 · deep brain \(Google\) starts 1 of 15 daily budget/,
+  );
+  assert.ok(slack.posts.some((text) => text.includes("Model usage: 1 task routed (research 1)")));
+  const bare = buildBriefMarkdown({
+    date: DAY,
+    finished: [],
+    finishedCount: 0,
+    running: [],
+    runningCount: 0,
+    needsDecision: [],
+    needsDecisionCount: 0,
+    diaryMarkdown: null,
+    lessonsViolated: [],
+    selfReviewProposals: [],
+  });
+  assert.equal(bare.includes("Model usage"), false);
 });

@@ -724,6 +724,7 @@ export class AgentService {
       slack: this.briefSlack,
       date,
       trigger,
+      googleDailyCap: this.config.brainGoogleDailyBudget,
     });
   }
   private async recordDailyBriefAudit(owner: string, brief: DailyBrief): Promise<void> {
