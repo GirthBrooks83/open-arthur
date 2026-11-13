@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Superseded — the PWA template is index.html</title>
+  </head>
+  <body>
+    <p>
+      This file is a kept record of the first PWA attempt, preserved in place rather than
+      deleted. It rested on a wrong premise: this app does not use expo-router (there is no
+      expo-router dependency; the entry is the plain App.tsx), so the expo-router/html +html
+      convention never applies here. As a file inside public/ it is only copied verbatim into
+      the web export as a static asset; nothing renders it as a template. The real template
+      hook for this stack is public/index.html — the Expo CLI checks the public folder for
+      index.html before falling back to its bundled template — and that is where the manifest
+      link, theme-color and touch icon live. This file is inert; its original content is kept
+      in the comment below.
+    </p>
+    <!--
+      Original first-attempt content (TypeScript, never a working template for this app):
+
+      import { ScrollViewStyleReset } from "expo-router/html";
+      import type { PropsWithChildren } from "react";
+
+      export default function Root({ children }: PropsWithChildren) {
+        return (
+          <html lang="en">
+            <head>
+              <meta charSet="utf-8" />
+              <meta httpEquiv="X-UA-Compatible" content="IE=edge" />
+              <meta
+                name="viewport"
+                content="width=device-width, initial-scale=1, shrink-to-fit=no"
+              />
+              <link rel="manifest" href="/manifest.json" />
+              <meta name="theme-color" content="#FCFCFC" />
+              <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+              <ScrollViewStyleReset />
+            </head>
+            <body>{children}</body>
+          </html>
+        );
+      }
+    -->
+  </body>
+</html>

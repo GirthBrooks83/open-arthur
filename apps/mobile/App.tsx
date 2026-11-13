@@ -37,6 +37,7 @@ import { ChatScreen, WorkspaceTools } from "./src/chat";
 import { ComputerEntry } from "./src/computer";
 import { ComputerDraftProvider } from "./src/computer-drafts";
 import { Details } from "./src/details";
+import { registerPwaServiceWorker } from "./src/pwa";
 import { BrowserScreen, CalendarScreen, FilesScreen, MailScreen } from "./src/screens";
 import { ThreadsProvider, ThreadsSheet, useMuseThread } from "./src/threads";
 import { Button, Card, colors, ErrorNotice, Field, IconButton, Mascot, s } from "./src/ui";
@@ -86,6 +87,9 @@ export default function App() {
   useEffect(() => {
     void connect();
   }, [connect]);
+  useEffect(() => {
+    registerPwaServiceWorker();
+  }, []);
   return (
     <SafeAreaProvider>
       <StatusBar style="dark" />
