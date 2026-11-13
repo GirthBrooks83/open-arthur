@@ -86,8 +86,16 @@ export async function executeModelTask(
   // OR >=1 successful tool result). The completion/pausing tools never
   // ground their own outcome: finish_task is the claim being checked,
   // ask_user and the prepare_* tools end the run without a result, and
-  // set_plan is planning, not evidence. Names only — no tool payloads
-  // are stored here.
+  // set_plan is planning, not evidence. consult_team is NOT in this
+  // set: it neither ends the run nor pauses it — a successful consult
+  // is a completed action with a recorded side effect (the posted
+  // message and the open consult in task state), the same class as
+  // save_artifact, so it grounds like any other successful tool
+  // result. A FAILED consult returns { error } and is excluded by the
+  // error check in the wrapper below, like every other tool. (A
+  // consult-only task parked critic-blocked in production on
+  // 2026-11-13 because this set lumped consult_team with the pausing
+  // tools.) Names only — no tool payloads are stored here.
   const successfulTools = new Set<string>();
   const nonGroundingTools = new Set([
     "finish_task",
@@ -95,7 +103,6 @@ export async function executeModelTask(
     "prepare_email",
     "prepare_event",
     "set_plan",
-    "consult_team",
   ]);
   const checkpoint = async () => {
     task = await ctx.checkpoint({ state: { ...task.state, operations } });
