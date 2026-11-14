@@ -32,13 +32,20 @@ import {
   IdeasScreen,
 } from "./src/agent-ui";
 import { AgentWorkspaceProvider, useAgentWorkspace } from "./src/agent-workspace";
-import { API_URL, createSession, MuseApi } from "./src/api";
+import {
+  API_URL,
+  consumeSigninLink,
+  createSession,
+  MuseApi,
+  restoreStoredSession,
+} from "./src/api";
 import { ChatScreen, WorkspaceTools } from "./src/chat";
 import { ComputerEntry } from "./src/computer";
 import { ComputerDraftProvider } from "./src/computer-drafts";
 import { Details } from "./src/details";
 import { registerPwaServiceWorker } from "./src/pwa";
 import { BrowserScreen, CalendarScreen, FilesScreen, MailScreen } from "./src/screens";
+import { writeStoredSession } from "./src/session-store";
 import { ThreadsProvider, ThreadsSheet, useMuseThread } from "./src/threads";
 import { Button, Card, colors, ErrorNotice, Field, IconButton, Mascot, s } from "./src/ui";
 import { type Detail, useWorkspace, WorkspaceContext } from "./src/workspace";
@@ -77,6 +84,7 @@ export default function App() {
     setError("");
     try {
       const session = await createSession(key);
+      writeStoredSession(session);
       setToken(session.token);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -85,7 +93,31 @@ export default function App() {
     }
   }, []);
   useEffect(() => {
-    void connect();
+    // Boot order: (1) a tap-to-sign-in link in the URL exchanges its
+    // one-time code and wins over everything; (2) a persisted session
+    // from a previous visit restores with no typing; (3) the plain
+    // session open (long-lived cookie, or the typed-key form).
+    void (async () => {
+      try {
+        const linked = await consumeSigninLink();
+        if (linked) {
+          setToken(linked.token);
+          setBusy(false);
+          return;
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        setBusy(false);
+        return;
+      }
+      const restored = await restoreStoredSession();
+      if (restored) {
+        setToken(restored.token);
+        setBusy(false);
+        return;
+      }
+      void connect();
+    })();
   }, [connect]);
   useEffect(() => {
     registerPwaServiceWorker();
