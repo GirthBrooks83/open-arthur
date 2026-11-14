@@ -234,6 +234,54 @@ export async function createApp(
     if (config.mode === "sample") await agent.refreshIdeas("local-user");
     return c.json(session);
   });
+  // Tap-to-sign-in links: minting is authenticated with the access
+  // key and returns a URL carrying a one-time code (hashed at rest,
+  // 10-minute life — see Auth.mintSigninCode). The exchange trades
+  // the code for a session exactly once. Both endpoints are
+  // rate-limited like the typed sign-in and mount before the /api/*
+  // auth middleware, like /api/session itself: the code IS the
+  // credential for the exchange.
+  let mintWindow = 0,
+    mintAttempts = 0;
+  app.post("/api/session/signin-link", async (c) => {
+    if (Date.now() - mintWindow > 60000) {
+      mintWindow = Date.now();
+      mintAttempts = 0;
+    }
+    if (++mintAttempts > 30)
+      throw new AppError("Too many sign-in link requests. Try again in a minute.", 429);
+    const body = z.object({ accessKey: z.string().optional() }).parse(await c.req.json());
+    const { code, expiresAt } = await auth.mintSigninCode(body.accessKey);
+    return c.json({
+      url: `${config.publicUrl}/?signin=${encodeURIComponent(code)}`,
+      expiresAt: new Date(expiresAt).toISOString(),
+    });
+  });
+  let exchangeWindow = 0,
+    exchangeAttempts = 0;
+  app.post("/api/session/signin-exchange", async (c) => {
+    if (Date.now() - exchangeWindow > 60000) {
+      exchangeWindow = Date.now();
+      exchangeAttempts = 0;
+    }
+    if (++exchangeAttempts > 30)
+      throw new AppError("Too many sign-in attempts. Try again in a minute.", 429);
+    const body = z.object({ code: z.string().optional() }).parse(await c.req.json());
+    const session = await auth.exchangeSigninCode(body.code);
+    await workspace.ensureSample("local-user", actions);
+    await agent.ensure("local-user");
+    if (config.mode === "sample") await agent.refreshIdeas("local-user");
+    // Also set the long-lived cookie, so a later visit whose stored
+    // token was cleared can still reopen through /api/session.
+    setCookie(c, LINK_COOKIE, session.token, {
+      httpOnly: true,
+      secure: config.publicUrl.startsWith("https://"),
+      sameSite: "Lax",
+      path: "/",
+      maxAge: Math.floor(LINK_SESSION_TTL_MS / 1000),
+    });
+    return c.json(session);
+  });
   app.get("/api/google/callback", async (c) => {
     if (c.req.query("error"))
       return c.html("<h1>Google connection cancelled</h1><p>You can return to OpenMuse.</p>", 400);
@@ -260,6 +308,11 @@ export async function createApp(
         : await auth.owner(c.req.header("authorization"));
     c.set("owner", owner);
     await next();
+  });
+  app.post("/api/session/sign-out", async (c) => {
+    const authorization = c.req.header("authorization");
+    if (authorization?.startsWith("Bearer ")) await auth.revokeSession(authorization.slice(7));
+    return c.json({ ok: true });
   });
   app.get("/api/workspace", async (c) => {
     const snapshot = await workspace.snapshot(c.get("owner"), c.req.query("q"));
