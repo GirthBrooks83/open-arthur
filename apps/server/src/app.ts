@@ -235,12 +235,15 @@ export async function createApp(
     return c.json(session);
   });
   // Tap-to-sign-in links: minting is authenticated with the access
-  // key and returns a URL carrying a one-time code (hashed at rest,
-  // 10-minute life — see Auth.mintSigninCode). The exchange trades
-  // the code for a session exactly once. Both endpoints are
-  // rate-limited like the typed sign-in and mount before the /api/*
-  // auth middleware, like /api/session itself: the code IS the
-  // credential for the exchange.
+  // key and returns a URL carrying a sign-in code (hashed at rest —
+  // see Auth.mintSigninCode). By default the code is one-time with a
+  // 10-minute life and the exchange trades it for a session exactly
+  // once; with durable: true the code never expires and is never
+  // consumed, so the same link signs its holder in every time (its
+  // expiresAt reads back as null). Both endpoints are rate-limited
+  // like the typed sign-in and mount before the /api/* auth
+  // middleware, like /api/session itself: the code IS the credential
+  // for the exchange.
   let mintWindow = 0,
     mintAttempts = 0;
   app.post("/api/session/signin-link", async (c) => {
@@ -250,11 +253,13 @@ export async function createApp(
     }
     if (++mintAttempts > 30)
       throw new AppError("Too many sign-in link requests. Try again in a minute.", 429);
-    const body = z.object({ accessKey: z.string().optional() }).parse(await c.req.json());
-    const { code, expiresAt } = await auth.mintSigninCode(body.accessKey);
+    const body = z
+      .object({ accessKey: z.string().optional(), durable: z.boolean().optional() })
+      .parse(await c.req.json());
+    const { code, expiresAt } = await auth.mintSigninCode(body.accessKey, body.durable);
     return c.json({
       url: `${config.publicUrl}/?signin=${encodeURIComponent(code)}`,
-      expiresAt: new Date(expiresAt).toISOString(),
+      expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(),
     });
   });
   let exchangeWindow = 0,

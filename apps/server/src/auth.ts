@@ -14,11 +14,16 @@ export const LINK_COOKIE = "openmuse_session";
 // token, never the access key itself, so it can be revoked by
 // deleting the session record without rotating the key.
 export const LINK_SESSION_TTL_MS = 90 * DAY_MS;
-// One-time sign-in codes (see mintSigninCode): a code trades for a
+// Sign-in codes (see mintSigninCode): a one-time code trades for a
 // session exactly once and dies quickly, so a sign-in link is safe to
-// send through chat/messages where a long-lived link would not be.
+// send through chat/messages where a long-lived link would not be. A
+// durable code (minted with durable: true) is the opposite trade: it
+// never expires and is never consumed, so ONE link keeps signing its
+// holder in until the code's record is deleted server-side — Joseph's
+// permanent bookmark link. Durable records carry expiresAt: null.
 export const SIGNIN_CODE_TTL_MS = 10 * 60 * 1000;
 const SIGNIN_CODE_KIND = "signin-codes";
+type SigninCodeRecord = { owner: string; expiresAt: number | null; durable?: boolean };
 export class Auth {
   constructor(
     private readonly db: Store,
@@ -37,33 +42,43 @@ export class Auth {
     if (!this.keyAccepted(accessKey)) throw new AppError("Access key is incorrect", 401);
     return this.issue(LINK_SESSION_TTL_MS);
   }
-  // Mint a one-time sign-in code for a tap-to-sign-in link
-  // (/?signin=<code>). Authenticated with the access key, exactly
-  // like the typed sign-in. Only the code's SHA-256 digest is stored,
-  // so a database read never yields a usable code.
-  async mintSigninCode(accessKey?: string) {
+  // Mint a sign-in code for a tap-to-sign-in link (/?signin=<code>).
+  // Authenticated with the access key, exactly like the typed
+  // sign-in. Only the code's SHA-256 digest is stored, so a database
+  // read never yields a usable code. With durable: true the code
+  // never expires and is not consumed on exchange (see
+  // exchangeSigninCode); revoke it by deleting its record (owner
+  // "system", kind "signin-codes", id = SHA-256 hex digest of the
+  // code) — the link dies immediately, no key rotation needed.
+  async mintSigninCode(accessKey?: string, durable = false) {
     if (!this.keyAccepted(accessKey)) throw new AppError("Access key is incorrect", 401);
     const code = randomBytes(32).toString("base64url");
-    const expiresAt = Date.now() + SIGNIN_CODE_TTL_MS;
+    const expiresAt = durable ? null : Date.now() + SIGNIN_CODE_TTL_MS;
     await this.db.put("system", SIGNIN_CODE_KIND, {
       id: digest(code).toString("hex"),
       owner: "local-user",
       expiresAt,
+      ...(durable ? { durable: true } : {}),
     });
     return { code, expiresAt };
   }
-  // Trade a one-time sign-in code for a session. The record is taken
+  // Trade a sign-in code for a session. A one-time record is taken
   // (deleted) atomically as it is read, so the same code can never be
-  // exchanged twice — not even by two requests racing. Expired codes
-  // fail the same way as unknown ones: no hint about which.
+  // exchanged twice — not even by two requests racing. A durable
+  // record is only read, never taken: it trades for a fresh session
+  // every time until the record is deleted. Expired codes fail the
+  // same way as unknown ones: no hint about which.
   async exchangeSigninCode(code?: string) {
     if (!code) throw new AppError("Sign-in link is invalid or has expired", 401);
-    const record = await this.db.take<{ owner: string; expiresAt: number }>(
-      "system",
-      SIGNIN_CODE_KIND,
-      digest(code).toString("hex"),
-    );
-    if (!record || record.expiresAt < Date.now())
+    const id = digest(code).toString("hex");
+    const peek = await this.db.get<SigninCodeRecord>("system", SIGNIN_CODE_KIND, id);
+    if (peek?.durable) {
+      if (peek.expiresAt !== null && peek.expiresAt < Date.now())
+        throw new AppError("Sign-in link is invalid or has expired", 401);
+      return this.issue(LINK_SESSION_TTL_MS);
+    }
+    const record = await this.db.take<SigninCodeRecord>("system", SIGNIN_CODE_KIND, id);
+    if (!record || record.expiresAt === null || record.expiresAt < Date.now())
       throw new AppError("Sign-in link is invalid or has expired", 401);
     return this.issue(LINK_SESSION_TTL_MS);
   }
