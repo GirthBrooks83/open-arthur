@@ -81,6 +81,10 @@ node --experimental-strip-types --test apps/worker/tests/lifecycle.test.ts
 
 The Docker test checks authentication, public page navigation, PNG dimensions, console input, redirect blocking, a real PDF download, worker restart, and profile/localStorage persistence. Public fixtures require internet access. The test's separate Chromium process seeds localStorage in its own disposable profile; the production API exposes no JavaScript evaluation endpoint.
 
+The redirect leg of both browser tests is served by a self-hosted fixture (`tests/redirect-fixture.ts`): a local server on a public IP assigned to the loopback interface, returning a real 302 to a loopback address, so redirect blocking is exercised without a third-party redirector. CI assigns the address in a workflow setup step; locally, run the browser tests as root or assign `45.33.32.156/32` to `lo` first (and make port 80 bindable by your user). The remaining live fixtures (example.com, a W3C PDF, httpbin response headers, an RFC document) still require internet access.
+
+The worker's npm lockfile is guarded by `tests/worker-lockfile.test.ts` in the root suite: any change to `apps/worker/package.json` must regenerate `apps/worker/package-lock.json` (`npm install` in `apps/worker`) or the quality gate fails — the Docker build's `npm ci` requires the two to agree.
+
 ## Local development
 
 From the repository root, configure `.env` with matching `WORKER_TOKEN` and `BROWSER_WORKER_URL`, then run:
