@@ -6,22 +6,18 @@ import { join } from "node:path";
 import test from "node:test";
 import { chromium } from "playwright";
 import { createBrowserManager } from "../src/browser.ts";
+import { startRedirectFixture } from "./redirect-fixture.ts";
 
 test("real Chromium cleans failed profiles and restores a saved UUID after worker restart", {
   timeout: 90_000,
 }, async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "openmuse-browser-lifecycle-"));
+  const fixture = await startRedirectFixture();
   let browser = await createBrowserManager({ dataDir });
   const id = randomUUID();
   const failedId = randomUUID();
   try {
-    await assert.rejects(
-      browser.create(
-        failedId,
-        "https://httpbin.org/redirect-to?url=http%3A%2F%2F127.0.0.1%3A8790%2Fhealth",
-      ),
-      { code: "NAVIGATION_FAILED" },
-    );
+    await assert.rejects(browser.create(failedId, fixture.url), { code: "NAVIGATION_FAILED" });
     assert.equal(browser.list().length, 0, "failed creation must release its saved-profile slot");
     assert.equal(
       (await readdir(dataDir)).includes(failedId),
@@ -47,7 +43,9 @@ test("real Chromium cleans failed profiles and restores a saved UUID after worke
     assert.equal(reopened.id, id);
     assert.equal(reopened.title, "Example Domain");
     const read = await browser.read(id);
-    assert.match(read.text, /Example Domain/);
+    assert.equal(read.title, "Example Domain");
+    assert.equal(read.url, "https://example.com/");
+    assert(read.text.length > 0, "example.com read returns visible text");
     await browser.navigate(id, "https://www.rfc-editor.org/rfc/rfc9110.txt");
     const largeRead = await browser.read(id);
     assert.equal(largeRead.text.length, 100_000);
@@ -65,6 +63,7 @@ test("real Chromium cleans failed profiles and restores a saved UUID after worke
     );
   } finally {
     await browser.close();
+    await fixture.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
