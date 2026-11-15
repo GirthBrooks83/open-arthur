@@ -9,7 +9,7 @@ import type {
   ProposalInput,
   Workspace,
 } from "../../../packages/domain/src/index.ts";
-import { GoogleClient } from "../../../packages/integrations/src/google.ts";
+import { GoogleApiError, GoogleClient } from "../../../packages/integrations/src/google.ts";
 import { createSamplePdf } from "../../../packages/integrations/src/pdf.ts";
 import type { ActionService } from "./actions.ts";
 import { agentConfigured } from "./agent-config.ts";
@@ -18,6 +18,20 @@ import type { Store } from "./db.ts";
 import { AppError } from "./errors.ts";
 import type { Files } from "./files.ts";
 import type { GoogleAuth } from "./google-auth.ts";
+
+// The standalone calendar routes surface service errors to the owner,
+// and the API layer passes GoogleApiError messages through verbatim —
+// but Google builds those messages from the provider's raw error
+// wording (quota metric, service name, project number), so a rejected
+// calendar call used to land on the Calendar screen raw. Mirror the
+// /api/workspace degrade: provider failures become one human message
+// here; every other error keeps its existing handling.
+const CALENDAR_UNAVAILABLE =
+  "Calendar is temporarily unavailable — it couldn't be loaded this time. " +
+  "Your events should come back on their own, so try again in a little while.";
+function degradeCalendarError(error: unknown): unknown {
+  return error instanceof GoogleApiError ? new AppError(CALENDAR_UNAVAILABLE, 502) : error;
+}
 
 export class WorkspaceService {
   private seeding = new Map<string, Promise<void>>();
@@ -63,7 +77,11 @@ export class WorkspaceService {
           accessRole: "owner",
         },
       ];
-    return this.google(owner, connection.id).listCalendars();
+    try {
+      return await this.google(owner, connection.id).listCalendars();
+    } catch (error) {
+      throw degradeCalendarError(error);
+    }
   }
   async events(
     owner: string,
@@ -71,7 +89,13 @@ export class WorkspaceService {
   ) {
     const connection = await this.connection(owner);
     if (!connection) return [];
-    if (this.config.mode === "live") return this.google(owner, connection.id).listEvents(options);
+    if (this.config.mode === "live") {
+      try {
+        return await this.google(owner, connection.id).listEvents(options);
+      } catch (error) {
+        throw degradeCalendarError(error);
+      }
+    }
     return (await this.db.list<CalendarEvent>(owner, "events"))
       .filter(
         (event) =>
