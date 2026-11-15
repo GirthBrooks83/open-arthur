@@ -982,9 +982,15 @@ export class AgentService {
     this.worker.start();
     // Maintenance is independent of the HTTP response and reconciles durable records.
     void this.maintain().catch((error) => backgroundFailure("initial maintenance", error));
+    // 5 minutes, not 60 s (Supabase egress fix F3): every cycle
+    // still full-scans the tasks kind for outcome recovery (see
+    // maintain()), and all four reconciliations are delay-tolerant
+    // background work — monitor activation is also driven
+    // synchronously by controlMonitor, and the ideas refresh
+    // already tolerates 15 minutes of staleness.
     this.maintenance = setInterval(() => {
       void this.maintain().catch((error) => backgroundFailure("maintenance", error));
-    }, 60000);
+    }, 300000);
   }
   async stop() {
     if (this.maintenance) clearInterval(this.maintenance);
@@ -997,11 +1003,26 @@ export class AgentService {
     this.refreshing = true;
     try {
       // Recover publications if the process exited after committing an outcome.
+      // This scan stays unfiltered (Supabase egress fix F3): the set
+      // publishOutcome can act on spans most statuses — including
+      // the terminal ones that accumulate until task retention
+      // exists — gated on state.notice/error combinations a status
+      // filter cannot express, so a filtered query would transfer
+      // nearly the same payload while risking a missed recovery.
+      // Its cost is cut by the 5-minute maintenance interval below;
+      // the other three scans have exact filters and use them.
       for (const { owner, value } of await this.db.scan<AgentTask>("tasks"))
         await this.publishOutcome(owner, value);
-      for (const { owner, value } of await this.db.scan<Monitor>("monitors"))
+      // activateMonitor's first check is status "active" — filter
+      // in SQL so inactive monitors never leave the database.
+      for (const { owner, value } of await this.db.scanByField<Monitor>(
+        "monitors",
+        "status",
+        "active",
+      ))
         await this.activateMonitor(owner, value);
-      for (const { owner, value } of await this.db.scan<Idea>("ideas"))
+      // Idea recovery below only acts on accepted ideas.
+      for (const { owner, value } of await this.db.scanByField<Idea>("ideas", "status", "accepted"))
         if (
           value.status === "accepted" &&
           value.taskId &&
@@ -1017,9 +1038,11 @@ export class AgentService {
               `idea-recovery:${value.id}`,
             );
           });
-      for (const { owner, value } of await this.db.scan<{ id: string; lastIdeasAt?: string }>(
-        "agent-settings",
-      )) {
+      // The settings loop below only ever reads the identity record.
+      for (const { owner, value } of await this.db.scanByField<{
+        id: string;
+        lastIdeasAt?: string;
+      }>("agent-settings", "id", "identity")) {
         if (value.id !== "identity") continue;
         if (!value.lastIdeasAt || Date.now() - Date.parse(value.lastIdeasAt) > 15 * 60000)
           await this.refreshIdeas(owner).catch(async () => {
