@@ -60,6 +60,13 @@ jobs:
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir apps/worker exec playwright install --with-deps chromium
+      # The self-hosted redirect fixture (apps/worker/tests/redirect-fixture.ts)
+      # listens on a public IP assigned to loopback; the port must be bindable
+      # by the test user.
+      - name: Assign the redirect fixture address
+        run: |
+          sudo ip addr add 45.33.32.156/32 dev lo
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
       - run: pnpm test:browser
   browser-container:
     runs-on: ubuntu-latest
@@ -71,6 +78,13 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
+      # The self-hosted redirect fixture (apps/worker/tests/redirect-fixture.ts)
+      # listens on a public IP assigned to loopback; the port must be bindable
+      # by the test user.
+      - name: Assign the redirect fixture address
+        run: |
+          sudo ip addr add 45.33.32.156/32 dev lo
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
       - run: node apps/worker/tests/run-docker.mjs
   computer-container:
     runs-on: ubuntu-latest
