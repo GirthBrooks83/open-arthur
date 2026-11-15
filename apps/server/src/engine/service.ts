@@ -65,6 +65,7 @@ import {
   scheduledDistillationDate,
 } from "./distillation.ts";
 import { analyzeSpending } from "./finance.ts";
+import { type GitHubEyes, githubEyesFor } from "./github-eyes.ts";
 import { type GraphitiLane, graphitiLaneFor } from "./graphiti.ts";
 import { type HindsightLane, hindsightLaneFor } from "./hindsight.ts";
 import { type Mem0Lane, mem0LaneFor } from "./mem0.ts";
@@ -159,6 +160,11 @@ export class AgentService {
   // SLACK_BRIEF_CHANNEL are set; failure-swallowing by value, like
   // the memory lanes.
   readonly briefSlack: SlackBriefPoster;
+  // GitHub eyes (engine/github-eyes.ts): read-only GitHub inspection
+  // via the official hosted GitHub MCP server. Configured only when
+  // GITHUB_MCP_TOKEN is set; connects lazily on first tool use, and
+  // read-only is enforced by an in-code allowlist, not by the token.
+  readonly githubEyes: GitHubEyes;
   private maintenance?: ReturnType<typeof setInterval>;
   private refreshing = false;
   constructor(
@@ -175,6 +181,7 @@ export class AgentService {
     this.hindsight = hindsightLaneFor(config);
     this.auditLog = new AuditLog(db);
     this.briefSlack = dailyBriefSlackFor(config);
+    this.githubEyes = githubEyesFor(config);
     this.worker = new TaskWorker(db, (owner, task, context) => this.execute(owner, task, context), {
       settled: async (owner, task) => {
         await this.recordTaskOutcome(owner, task);

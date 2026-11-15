@@ -213,7 +213,17 @@ export async function createApp(
         hindsightWired: Boolean(config.integrations?.hindsightUrl),
         n8n: Boolean(config.integrations?.n8nUrl),
         anythingllm: Boolean(config.integrations?.anythingLlmUrl),
+        // GitHub eyes (engine/github-eyes.ts): `github` is the
+        // configured level (token present) and `githubWired` is a
+        // code fact (the read-only MCP adapter ships in this
+        // codebase). The honest runtime level — configured vs wired
+        // (handshake done) vs verified (a real read succeeded) —
+        // is the `githubEyes` block below, from the client's cached
+        // status; it never claims a level it has not reached.
+        github: Boolean(config.githubMcpToken),
+        githubWired: true,
       },
+      githubEyes: agent.githubEyes.status(),
       integrationsLive: live.integrationsLive,
       browserLive: live.browserLive,
     });

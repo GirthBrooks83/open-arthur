@@ -429,6 +429,117 @@ export async function executeModelTask(
         return { paused: true, question };
       },
     ),
+    // GitHub eyes (engine/github-eyes.ts): READ-ONLY GitHub
+    // inspection, offered only when GITHUB_MCP_TOKEN is configured.
+    // The client enforces the read-only allowlist in code — there
+    // is no GitHub write tool behind these, whatever the upstream
+    // MCP server offers.
+    ...(service.githubEyes.configured
+      ? [
+          tool(
+            "github_repo_overview",
+            "Read an overview of a GitHub repository (metadata, description, default branch, counts). Read-only.",
+            z.object({ owner: z.string().min(1), repo: z.string().min(1) }),
+            async (args) => service.githubEyes.readTool("github_repo_overview", { ...args }),
+          ),
+          tool(
+            "github_list_branches",
+            "List branches of a GitHub repository. Read-only.",
+            z.object({
+              owner: z.string().min(1),
+              repo: z.string().min(1),
+              page: z.number().int().min(1).optional(),
+              perPage: z.number().int().min(1).max(100).optional(),
+            }),
+            async (args) => service.githubEyes.readTool("github_list_branches", { ...args }),
+          ),
+          tool(
+            "github_list_commits",
+            "List commits of a GitHub repository, newest first; optionally for one branch/SHA or file path. Read-only.",
+            z.object({
+              owner: z.string().min(1),
+              repo: z.string().min(1),
+              sha: z.string().min(1).optional(),
+              path: z.string().min(1).optional(),
+              page: z.number().int().min(1).optional(),
+              perPage: z.number().int().min(1).max(100).optional(),
+            }),
+            async (args) => service.githubEyes.readTool("github_list_commits", { ...args }),
+          ),
+          tool(
+            "github_get_commit",
+            "Read one commit: message, author, and per-file change stats (detail=full_patch also returns the diff and can be large). Read-only.",
+            z.object({
+              owner: z.string().min(1),
+              repo: z.string().min(1),
+              sha: z.string().min(1),
+              detail: z.enum(["none", "stats", "full_patch"]).optional(),
+            }),
+            async (args) => service.githubEyes.readTool("github_get_commit", { ...args }),
+          ),
+          tool(
+            "github_list_pull_requests",
+            "List pull requests of a GitHub repository, optionally filtered by state (open, closed, all). Read-only.",
+            z.object({
+              owner: z.string().min(1),
+              repo: z.string().min(1),
+              state: z.enum(["open", "closed", "all"]).optional(),
+              page: z.number().int().min(1).optional(),
+              perPage: z.number().int().min(1).max(100).optional(),
+            }),
+            async (args) => service.githubEyes.readTool("github_list_pull_requests", { ...args }),
+          ),
+          tool(
+            "github_get_pull_request",
+            "Read one pull request. view=get: details; view=files: changed files with stats (the diff summary); view=diff: the full unified diff (large); view=commits / view=reviews / view=status / view=check_runs: the PR's commits, reviews, combined status, or CI check runs. Read-only.",
+            z.object({
+              owner: z.string().min(1),
+              repo: z.string().min(1),
+              pullNumber: z.number().int().min(1),
+              view: z
+                .enum(["get", "files", "diff", "commits", "status", "reviews", "check_runs"])
+                .optional(),
+            }),
+            async (args) => service.githubEyes.readTool("github_get_pull_request", { ...args }),
+          ),
+          tool(
+            "github_list_issues",
+            "List issues of a GitHub repository, optionally filtered by state or labels. Read-only.",
+            z.object({
+              owner: z.string().min(1),
+              repo: z.string().min(1),
+              state: z.enum(["open", "closed", "all"]).optional(),
+              labels: z.array(z.string().min(1)).optional(),
+              page: z.number().int().min(1).optional(),
+              perPage: z.number().int().min(1).max(100).optional(),
+            }),
+            async (args) => service.githubEyes.readTool("github_list_issues", { ...args }),
+          ),
+          tool(
+            "github_get_issue",
+            "Read one issue. view=get: details; view=comments: its comments; view=labels: its labels. Read-only.",
+            z.object({
+              owner: z.string().min(1),
+              repo: z.string().min(1),
+              issue_number: z.number().int().min(1),
+              view: z.enum(["get", "comments", "labels"]).optional(),
+            }),
+            async (args) => service.githubEyes.readTool("github_get_issue", { ...args }),
+          ),
+          tool(
+            "github_list_workflow_runs",
+            "List recent GitHub Actions workflow runs of a repository, optionally for one workflow file (e.g. ci.yml). Read-only.",
+            z.object({
+              owner: z.string().min(1),
+              repo: z.string().min(1),
+              workflow: z.string().min(1).optional(),
+              page: z.number().int().min(1).optional(),
+              perPage: z.number().int().min(1).max(100).optional(),
+            }),
+            async (args) => service.githubEyes.readTool("github_list_workflow_runs", { ...args }),
+          ),
+        ]
+      : []),
     tool(
       "finish_task",
       "Finish only when the requested outcome is actually achieved",
