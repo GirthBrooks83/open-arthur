@@ -253,7 +253,7 @@ test("a critic-blocked task emits task.critic_blocked and no completion", async 
     });
     await server.agent.worker.tick();
     const detail = await server.agent.detail("owner", task.id);
-    assert.equal(detail.task.status, "paused");
+    assert.equal(detail.task.status, "blocked");
     assert.equal(detail.task.state.criticBlocked, true);
     const events = await server.agent.auditEvents("owner");
     const blocked = events.find((event) => event.operation === "task.critic_blocked");

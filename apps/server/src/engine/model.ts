@@ -14,6 +14,7 @@ import {
 } from "./arthur-record.ts";
 import { classifyTaskText, googleDailyBudget, modelFamily, routeModels } from "./brain-router.ts";
 import { type ConsultRecord, findOpenConsult, openConsult } from "./consults.ts";
+import { EngineError, humanProviderError, isEngineAuthoredError } from "./provider-boundary.ts";
 import {
   allProvidersExhaustedMessage,
   buildProviderChain,
@@ -23,7 +24,7 @@ import {
 } from "./rate-limit.ts";
 import type { AgentService } from "./service.ts";
 import { skillManageOpSchema } from "./skills.ts";
-import type { TaskContext } from "./worker.ts";
+import { LostLeaseError, type TaskContext } from "./worker.ts";
 
 // Truncation visibility (ATLAS audit 2026-11-06, Priority 1): a model
 // call that stops on the per-call output-token cap
@@ -97,6 +98,12 @@ export async function executeModelTask(
   // 2026-11-13 because this set lumped consult_team with the pausing
   // tools.) Names only — no tool payloads are stored here.
   const successfulTools = new Set<string>();
+  // Every tool actually invoked, success or failure — the Critic
+  // gate's scope signal (engine/service.ts): a run that attempted
+  // work tools and still finished is reporting on their outcomes, so
+  // its completion needs evidence even when the prompt alone would
+  // not require any. Names only, like successfulTools.
+  const attemptedTools = new Set<string>();
   const nonGroundingTools = new Set([
     "finish_task",
     "ask_user",
@@ -136,6 +143,7 @@ export async function executeModelTask(
               status: outcome.status,
               reason: "The task is waiting or finished; do not perform more actions.",
             };
+          attemptedTools.add(name);
           await ctx.guard();
           await ctx.event("step", description);
           try {
@@ -547,7 +555,7 @@ export async function executeModelTask(
         "abort",
         () => {
           clearTimeout(timer);
-          reject(new Error("Task interrupted"));
+          reject(new EngineError("Task interrupted"));
         },
         { once: true },
       );
@@ -579,12 +587,12 @@ export async function executeModelTask(
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
           agent.abortRun();
-          reject(new Error("Model run timed out after five minutes"));
+          reject(new EngineError("Model run timed out after five minutes"));
         }, 300000);
         const abort = () => {
           clearTimeout(timeout);
           agent.abortRun();
-          reject(new Error("Task interrupted"));
+          reject(new EngineError("Task interrupted"));
         };
         ctx.signal.addEventListener("abort", abort, { once: true });
         agent.run(input).subscribe({
@@ -628,8 +636,17 @@ export async function executeModelTask(
     if (!failure || outcome) break;
     const delay = rateLimitDelayMs(failure);
     if (delay === null) {
-      if (thrown) throw thrown;
-      throw new Error(failure);
+      // Not a rate limit: a provider rejection (or an engine error).
+      // The raw provider wording never reaches the task record — the
+      // user sees a short human message instead (D2). A lost lease
+      // keeps its type: the worker treats it as an interruption, not
+      // a failure. An engine-authored error keeps its identity too
+      // (round 2): it was written for the user, so it is rethrown
+      // as-is rather than translated — only provider errors go
+      // through humanProviderError.
+      if (thrown instanceof LostLeaseError) throw thrown;
+      if (isEngineAuthoredError(thrown)) throw thrown;
+      throw new Error(humanProviderError(thrown ?? failure));
     }
     // Quota exhaustion (a daily cap, or a per-minute window that keeps
     // renewing past the retry budget) ends this provider for the run:
@@ -690,15 +707,22 @@ export async function executeModelTask(
     );
   }
   if (text) await ctx.event("step", "Agent update", text.slice(0, 12000));
-  // Hand the run's successful-tool record to the service's Critic
-  // gate on the outcome's state (merged over the task's current
-  // state, like the truncation marker above, so no checkpointed
-  // state is lost).
+  // Hand the run's tool records to the service's Critic gate on the
+  // outcome's state (merged over the task's current state, like the
+  // truncation marker above, so no checkpointed state is lost):
+  // toolResults grounds the completion, attemptedTools scopes the
+  // gate (a run that attempted work tools is reporting on them).
   const toolResults = [...successfulTools];
-  if (outcome && toolResults.length)
+  const attempted = [...attemptedTools];
+  if (outcome && (toolResults.length || attempted.length))
     outcome = {
       ...outcome,
-      state: { ...task.state, ...(outcome.state ?? {}), toolResults },
+      state: {
+        ...task.state,
+        ...(outcome.state ?? {}),
+        ...(toolResults.length ? { toolResults } : {}),
+        ...(attempted.length ? { attemptedTools: attempted } : {}),
+      },
     };
   return (
     outcome ?? {
@@ -709,6 +733,7 @@ export async function executeModelTask(
         lastUpdate: text,
         ...(truncated && text ? { truncated: true } : {}),
         ...(toolResults.length ? { toolResults } : {}),
+        ...(attempted.length ? { attemptedTools: attempted } : {}),
       },
     }
   );

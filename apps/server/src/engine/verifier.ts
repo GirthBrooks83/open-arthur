@@ -25,6 +25,13 @@ export const INSUFFICIENT_EVIDENCE =
 export const VERIFICATION_FAILED =
   "I could not return a verified answer from the available evidence.";
 
+// The human-readable reason recorded on a task the Critic ends as
+// terminally blocked (D1): why it stopped and what to do instead —
+// the record a person reads, distinct from the fixed refusal above,
+// which stays the task's user-facing result.
+export const CRITIC_BLOCKED_REASON =
+  "Blocked by the evidence check: this completion was not grounded in any matching memory, task evidence, or successful tool result, so it was not shipped. Start a new task, or point it at the source it should answer from.";
+
 // Agent-Me's retriever threshold (knowledge.py _MIN_QUERY_COVERAGE):
 // a recall fact survives into the EvidenceBundle only when it covers
 // at least this fraction of the query's non-stop-word tokens, so "no
@@ -249,6 +256,59 @@ export function critiqueAnswer(
     grounded: bundle.matches.length > 0 || successfulToolResults > 0,
     queryCoverage: querySet.size ? Math.round((covered / querySet.size) * 10000) / 10000 : 0,
   });
+}
+
+// --- Critic scope (D1) ---
+//
+// The evidence gate exists to stop a completion that CLAIMS facts —
+// about the user's stored data or the world — it cannot back. It was
+// applied to every completion, so a general instruction whose output
+// is the work itself (formatting, drafting, transforming supplied
+// text) was blocked for having no memory match: production task
+// 18ee7f55 ("Reply with exactly: PING OK", evidence_count 0) parked
+// with the refusal. requiresEvidence draws the line on the prompt:
+// a task requires evidence when it asks a factual question, or asks
+// to recall/report the user's own stored state. The service ALSO
+// applies the gate when the run attempted work tools (a completion
+// reporting tool outcomes needs backing whatever the prompt's
+// shape); this function judges the prompt alone.
+export function requiresEvidence(prompt: string): boolean {
+  const text = prompt.trim().toLowerCase();
+  if (!text) return false;
+  // A question asking for a fact: the completion asserts an answer.
+  if (/^(what|when|where|who|whom|whose|which|why|how)\b/.test(text)) return true;
+  if (/^(is|are|was|were|do|does|did|have|has)\b/.test(text) && text.includes("?")) return true;
+  // Recall of stored facts, however phrased.
+  if (/\b(remind me|do you remember|remember when)\b/.test(text)) return true;
+  if (
+    /\bmy\b[^.?!]{0,24}\b(email|inbox|files?|documents?|tasks?|goals?|notes?|memories|records?|schedule|priorities)\b/.test(
+      text,
+    )
+  )
+    return true;
+  if (/\bmy (calendar|events?|name|address|phone|accounts?)\b/.test(text)) return true;
+  // Imperatives that ask to report stored state ("List my tasks").
+  if (/^(list|show|find|report)\b/.test(text) && /\bmy\b/.test(text)) return true;
+  // Factual imperatives (round 2, ATLAS review of PR #47): an
+  // information-fetch lead verb ("Tell me today's weather", "Give
+  // me the current price of Bitcoin") asserts a world fact exactly
+  // like the question form, and round 1 let it bypass the gate when
+  // the model answered without tools. The gate applies only when
+  // the imperative ALSO carries a factual signal — a temporal
+  // marker (today, current, latest, now, ...) or a factual-topic
+  // marker (weather, price, news, score, forecast, ...). The signal
+  // requirement is the false-positive guard: creative imperatives
+  // ("Tell me a joke", "Give me a poem about autumn") carry neither
+  // and stay ungated, as do fetching verbs aimed at supplied or
+  // creative content ("Check this draft", "Get me a coffee").
+  if (
+    /^(tell|give|show|check|fetch|get|find|search|report|look up|find out)\b/.test(text) &&
+    /\b(today|todays|current|currently|latest|now|tonight|tomorrow|yesterday|weather|forecast|price|prices|pricing|news|headlines?|scores?|stock|stocks|temperature|exchange rate)\b/.test(
+      text,
+    )
+  )
+    return true;
+  return false;
 }
 
 // The distinct source ids an answer may cite as [id].
