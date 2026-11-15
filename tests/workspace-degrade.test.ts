@@ -109,3 +109,41 @@ test("when both Google sources answer, the snapshot carries no notices", async (
   const snapshot = await service.snapshot("owner-1");
   assert.deepEqual(snapshot.notices, []);
 });
+
+// The degrade hides the provider's wording from the owner, but the
+// failure must not vanish: it is recorded server-side (providerFailure
+// writes through console.error) with the operation, the HTTP status and
+// the provider's own detail — and never the access token.
+async function captureErrorLog(run: () => Promise<unknown>): Promise<string> {
+  const records: unknown[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    records.push(...args);
+  };
+  try {
+    await run();
+  } finally {
+    console.error = originalError;
+  }
+  return JSON.stringify(records);
+}
+
+test("a Gmail failure is logged server-side with the provider detail", async () => {
+  gmailFails = true;
+  calendarFails = false;
+  const logged = await captureErrorLog(() => service.snapshot("owner-1"));
+  assert.match(logged, /workspace mail load/);
+  assert.match(logged, /Quota exceeded/);
+  assert.match(logged, /"status":403/);
+  assert.doesNotMatch(logged, /test-access-token/);
+});
+
+test("a Calendar failure is logged server-side with the provider detail", async () => {
+  gmailFails = false;
+  calendarFails = true;
+  const logged = await captureErrorLog(() => service.snapshot("owner-1"));
+  assert.match(logged, /workspace events load/);
+  assert.match(logged, /Quota exceeded/);
+  assert.match(logged, /"status":403/);
+  assert.doesNotMatch(logged, /test-access-token/);
+});

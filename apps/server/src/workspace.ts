@@ -19,6 +19,7 @@ import type { Store } from "./db.ts";
 import { AppError } from "./errors.ts";
 import type { Files } from "./files.ts";
 import type { GoogleAuth } from "./google-auth.ts";
+import { providerFailure } from "./log.ts";
 
 export class WorkspaceService {
   private seeding = new Map<string, Promise<void>>();
@@ -273,10 +274,13 @@ export class WorkspaceService {
       // through verbatim — so the owner saw a raw provider string as a
       // fatal workspace failure. Now the failed source loads empty and
       // carries a human notice; the provider's raw wording, quota
-      // internals and project numbers never enter the snapshot.
+      // internals and project numbers never enter the snapshot. The
+      // failure itself is still recorded server-side (providerFailure)
+      // so a persistent outage stays diagnosable from the logs.
       try {
         mail = await this.cacheMail(owner, await google.listMail(query), connection.id);
-      } catch {
+      } catch (error) {
+        providerFailure("workspace mail load", error);
         mail = [];
         notices.push({
           source: "mail",
@@ -287,7 +291,8 @@ export class WorkspaceService {
       try {
         events = await google.listEvents();
         for (const event of events) await this.db.put(owner, "events", event);
-      } catch {
+      } catch (error) {
+        providerFailure("workspace events load", error);
         events = [];
         notices.push({
           source: "events",
