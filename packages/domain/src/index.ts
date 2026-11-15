@@ -12,7 +12,8 @@ export type Section =
   | "connections"
   | "ideas"
   | "goals"
-  | "apps";
+  | "apps"
+  | "news";
 export interface Mail {
   id: string;
   threadId: string;
@@ -25,6 +26,17 @@ export interface Mail {
   unread: boolean;
   label: string;
   attachments: string[];
+}
+export interface NewsItem {
+  headline: string;
+  source: string | null;
+  url: string | null;
+}
+export interface NewsBriefing {
+  id: string;
+  title: string;
+  items: NewsItem[];
+  createdAt: string;
 }
 export interface CalendarEvent {
   id: string;

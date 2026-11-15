@@ -44,7 +44,7 @@ import { ComputerEntry } from "./src/computer";
 import { ComputerDraftProvider } from "./src/computer-drafts";
 import { Details } from "./src/details";
 import { registerPwaServiceWorker } from "./src/pwa";
-import { BrowserScreen, CalendarScreen, FilesScreen, MailScreen } from "./src/screens";
+import { BrowserScreen, CalendarScreen, FilesScreen, MailScreen, NewsScreen } from "./src/screens";
 import { writeStoredSession } from "./src/session-store";
 import { ThreadsProvider, ThreadsSheet, useMuseThread } from "./src/threads";
 import { Button, Card, colors, ErrorNotice, Field, IconButton, Mascot, s } from "./src/ui";
@@ -73,6 +73,7 @@ const titles: Partial<Record<Section, { title: string; subtitle: string }>> = {
   calendar: { title: "Calendar", subtitle: "Time for what matters." },
   browser: { title: "Browser", subtitle: "Your connected browsing sessions." },
   files: { title: "Files", subtitle: "Documents, forms and filled copies." },
+  news: { title: "News", subtitle: "Briefings, filed off to the side." },
 };
 export default function App() {
   const [token, setToken] = useState("");
@@ -317,14 +318,16 @@ function WorkspaceShell({
           ? BrowserScreen
           : section === "files"
             ? FilesScreen
-            : section === "activity"
-              ? AgentActivityScreen
-              : section === "ideas"
-                ? IdeasScreen
-                : section === "goals"
-                  ? GoalsScreen
-                  : AppsScreen;
-  const utility = ["mail", "calendar", "browser", "files"].includes(section);
+            : section === "news"
+              ? NewsScreen
+              : section === "activity"
+                ? AgentActivityScreen
+                : section === "ideas"
+                  ? IdeasScreen
+                  : section === "goals"
+                    ? GoalsScreen
+                    : AppsScreen;
+  const utility = ["mail", "calendar", "browser", "files", "news"].includes(section);
   return (
     <>
       <WorkspaceTools />
