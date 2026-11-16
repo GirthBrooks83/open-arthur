@@ -21,6 +21,17 @@ export interface ExecutionRecord {
   details: string;
   at: string;
   result: string;
+  /**
+   * Lifecycle of the run: "claimed" once the executor has claimed the
+   * request and the runner has been (or is about to be) invoked, then
+   * "completed" when the runner returns. A record restored from the
+   * durable store still in "claimed" state means the process died
+   * mid-run — the action's outcome is unknown, it must NOT be executed
+   * again automatically, and the stuck claim is surfaced to the owner
+   * as an interrupted execution. Absent on records written before this
+   * field existed; those are completed runs.
+   */
+  state?: "claimed" | "completed";
 }
 
 /** The side-effecting work, injected so tests can observe exactly what ran. */
@@ -80,6 +91,7 @@ export class ApprovalExecutor {
       details: current.details,
       at: this.now().toISOString(),
       result,
+      state: "completed",
     };
     this.executions.push(record);
     this.executedIds.add(id);
@@ -95,7 +107,10 @@ export class ApprovalExecutor {
    * Persistence seam (production port): seed this executor with
    * execution records loaded from the durable store, so the
    * at-most-once guarantee survives a restart — a request executed
-   * before the restart still refuses to execute again.
+   * before the restart still refuses to execute again. A record still
+   * in "claimed" state seeds the same refusal: the run it belongs to
+   * was interrupted mid-flight, its outcome is unknown, and it is
+   * surfaced (via the log) rather than ever re-run automatically.
    */
   restoreRecords(records: ExecutionRecord[]): void {
     for (const record of records) {
@@ -112,10 +127,19 @@ export class ApprovalExecutor {
    * re-execute: the claim is already recorded. The guards are identical
    * and run synchronously up front; a refusal throws before the runner
    * is ever invoked.
+   *
+   * The optional `onClaim` hook is the durability seam: it receives
+   * the claim record (state "claimed") after the in-memory claim and
+   * BEFORE the runner is invoked, so the caller can persist the claim
+   * durably first. If persisting the claim fails, the hook throws and
+   * the runner never runs — no durable claim, no side effect. When the
+   * runner returns, the claim record is completed in place (state
+   * "completed", with the result) and returned.
    */
   async executeAsync(
     id: string,
     runner: (version: ProposalVersion) => Promise<string>,
+    hooks?: { onClaim?: (claim: ExecutionRecord) => Promise<void> | void },
   ): Promise<ExecutionRecord> {
     if (this.executedIds.has(id)) {
       throw new ApprovalError(
@@ -142,19 +166,31 @@ export class ApprovalExecutor {
         "Approved version does not match the current version; refusing to execute",
       );
     }
-    // Claim first (at-most-once), then run.
+    // Claim first (at-most-once), then run. The claim record exists
+    // from this moment on: if the process dies while the runner is
+    // mid-flight, the restored claim still blocks any re-execution
+    // and surfaces as an interrupted execution instead of vanishing.
     this.executedIds.add(id);
-    const result = await runner(current);
-    const record: ExecutionRecord = {
+    const claim: ExecutionRecord = {
       requestId: id,
       version: current.version,
       contentHash: current.contentHash,
       action: current.action,
       details: current.details,
       at: this.now().toISOString(),
-      result,
+      result: "",
+      state: "claimed",
     };
-    this.executions.push(record);
+    this.executions.push(claim);
+    await hooks?.onClaim?.(claim);
+    const result = await runner(current);
+    const record: ExecutionRecord = {
+      ...claim,
+      at: this.now().toISOString(),
+      result,
+      state: "completed",
+    };
+    this.executions[this.executions.indexOf(claim)] = record;
     return record;
   }
 }

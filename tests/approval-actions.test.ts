@@ -7,10 +7,12 @@ import { createApp } from "../apps/server/src/app.ts";
 import type { Config } from "../apps/server/src/config.ts";
 import { createStore, type Store } from "../apps/server/src/db.ts";
 import {
+  APPROVAL_EXECUTION_KIND,
   type ApprovalActionRunner,
   ApprovalGate,
 } from "../apps/server/src/engine/approval-actions.ts";
 import type { ProposalVersion } from "../apps/server/src/engine/approval-center.ts";
+import type { ExecutionRecord } from "../apps/server/src/engine/approval-executor.ts";
 import { AppError } from "../apps/server/src/errors.ts";
 import type { AgentTask } from "../packages/domain/src/agent.ts";
 
@@ -121,6 +123,7 @@ test("a deploy approved at its exact version executes once, with that exact vers
     // The execution record binds to v2's number AND content hash.
     assert.equal(record.version, 2);
     assert.equal(record.contentHash, v2.contentHash);
+    assert.equal(record.state, "completed");
 
     // At most once: a second execute refuses and the runner never runs again.
     await assert.rejects(() => gate.execute("owner", req.id), isConflict);
@@ -171,6 +174,126 @@ test("an action without a call site in this port refuses, even when approved", a
     await gate.control("owner", req.id, "approve_exact_version", { version: 1 });
     await assert.rejects(() => gate.execute("owner", req.id), isConflict);
     assert.equal(calls.length, 0);
+  } finally {
+    await db.close();
+  }
+});
+
+test("the claim is durable before the runner runs, and a crash mid-run cannot re-execute", async () => {
+  const db = await createStore();
+  try {
+    // The runner snapshots the store at invocation time, then blocks —
+    // the blocked runner IS the simulated crash window: from here on,
+    // the first gate is treated as dead mid-execution.
+    let release: (value: string) => void = () => {};
+    let markEntered: () => void = () => {};
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    let atRunTime: (ExecutionRecord & { id: string })[] = [];
+    const gate = new ApprovalGate(
+      db,
+      {
+        merge: async () => {
+          atRunTime = await db.list<ExecutionRecord & { id: string }>(
+            "owner",
+            APPROVAL_EXECUTION_KIND,
+          );
+          markEntered();
+          return new Promise<string>((resolve) => {
+            release = resolve;
+          });
+        },
+      },
+      async () => "fallback ran",
+    );
+    const req = await gate.create("owner", mergeV1);
+    await gate.control("owner", req.id, "approve_exact_version", { version: 1 });
+
+    const running = gate.execute("owner", req.id);
+    await entered;
+
+    // Claim-before-run: at the moment the runner started, the store
+    // already held the claimed execution record for this request.
+    assert.equal(atRunTime.length, 1);
+    assert.equal(atRunTime[0]?.requestId, req.id);
+    assert.equal(atRunTime[0]?.version, 1);
+    assert.equal(atRunTime[0]?.state, "claimed");
+
+    // "Crash": a fresh gate over the same store (the post-restart
+    // world) refuses to execute the request a second time, and its
+    // runner is never invoked.
+    const after = spyRunners();
+    const gateB = new ApprovalGate(db, after.runners, async () => "fallback ran");
+    await assert.rejects(() => gateB.execute("owner", req.id), isConflict);
+    assert.equal(after.calls.length, 0);
+
+    // The stuck claim is visible as the interrupted execution —
+    // surfaced for the owner's decision, never silently re-run.
+    const view = await gateB.get("owner", req.id);
+    assert.equal(view.executions.length, 1);
+    assert.equal(view.executions[0]?.state, "claimed");
+    assert.equal(view.executions[0]?.result, "");
+
+    // When the original run does finish, the same record completes.
+    release("merge executed: done");
+    const record = await running;
+    assert.equal(record.state, "completed");
+    assert.equal(record.result, "merge executed: done");
+    const settled = await gateB.get("owner", req.id);
+    assert.equal(settled.executions.length, 1);
+    assert.equal(settled.executions[0]?.state, "completed");
+  } finally {
+    await db.close();
+  }
+});
+
+test("a runner failure reaches the client as a generic message, with the detail logged", async () => {
+  const db = await createStore();
+  try {
+    const internal = "upstream 502 from runner-host-7: credential ghp_TESTLEAK refused";
+    const gate = new ApprovalGate(
+      db,
+      {
+        merge: async () => {
+          throw new Error(internal);
+        },
+      },
+      async () => "fallback ran",
+    );
+    const req = await gate.create("owner", mergeV1);
+    await gate.control("owner", req.id, "approve_exact_version", { version: 1 });
+
+    const logged: unknown[][] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    try {
+      await assert.rejects(
+        () => gate.execute("owner", req.id),
+        (error: unknown) => {
+          assert.ok(error instanceof AppError);
+          assert.equal(error.status, 500);
+          // The client sees ONLY the generic human message — no part
+          // of the internal error text leaks into the response.
+          assert.equal(error.message, "Something went wrong running that approval — it's logged.");
+          assert.ok(!error.message.includes("ghp_TESTLEAK"));
+          assert.ok(!error.message.includes("upstream"));
+          return true;
+        },
+      );
+    } finally {
+      console.error = originalError;
+    }
+    // The full detail is in the server-side log instead.
+    assert.match(JSON.stringify(logged), /ghp_TESTLEAK/);
+
+    // The claim persisted before the run stays behind, marked as the
+    // interrupted execution whose outcome the owner must decide on.
+    const { executions } = await gate.get("owner", req.id);
+    assert.equal(executions.length, 1);
+    assert.equal(executions[0]?.state, "claimed");
   } finally {
     await db.close();
   }

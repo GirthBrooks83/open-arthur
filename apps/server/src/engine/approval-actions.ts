@@ -1,5 +1,6 @@
 import type { Store } from "../db.ts";
 import { AppError } from "../errors.ts";
+import { providerFailure } from "../log.ts";
 import {
   ApprovalCenter,
   type ApprovalControl,
@@ -21,6 +22,11 @@ import { ApprovalExecutor, type ExecutionRecord } from "./approval-executor.ts";
 //   restart loses nothing and no in-memory copy can diverge.
 // - Execution records live under kind "approval-executions" and seed
 //   the executor on every execute, so at-most-once survives restarts.
+//   An execution is CLAIMED in the store before its runner starts
+//   (state "claimed") and the same record is completed when the runner
+//   returns — a crash mid-run leaves the claim behind, so the action
+//   can never run twice and the interrupted run stays visible to the
+//   owner instead of vanishing.
 // - MERGE and DEPLOY are the first restricted actions routed through
 //   the executor: an execute call for any other action kind refuses —
 //   everything else keeps its current path, per the port's scope.
@@ -53,7 +59,12 @@ export function approvalAppError(error: unknown): AppError {
     const status = error.code === "not_found" ? 404 : error.code === "empty_proposal" ? 422 : 409;
     return new AppError(error.message, status);
   }
-  return new AppError(error instanceof Error ? error.message : "Approval operation failed", 500);
+  // Anything else is an internal failure (store, runner, provider).
+  // The full detail is logged server-side and NEVER reaches the
+  // client: raw internal or upstream error text is not client-facing
+  // wording, so the response carries one generic human message.
+  providerFailure("approval operation", error);
+  return new AppError("Something went wrong running that approval — it's logged.", 500);
 }
 
 type StoredExecution = ExecutionRecord & { id: string };
@@ -88,6 +99,7 @@ export class ApprovalGate {
         details: record.details,
         at: record.at,
         result: record.result,
+        state: record.state,
       })),
     );
     return executor;
@@ -202,7 +214,17 @@ export class ApprovalGate {
     const executor = await this.loadExecutor(owner, center);
     let record: ExecutionRecord;
     try {
-      record = await executor.executeAsync(id, (version) => runner(owner, version));
+      record = await executor.executeAsync(id, (version) => runner(owner, version), {
+        // Claim-before-run: the claimed execution record is durable
+        // BEFORE the runner starts. If the process dies mid-run, the
+        // claim is what a restart restores — it blocks any second
+        // execution and shows up as the interrupted run, instead of
+        // the execution vanishing and the action running twice. If
+        // the claim cannot be persisted, the runner never runs.
+        onClaim: async (claim) => {
+          await this.db.put(owner, APPROVAL_EXECUTION_KIND, { ...claim, id: claim.requestId });
+        },
+      });
     } catch (error) {
       throw approvalAppError(error);
     }
