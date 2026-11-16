@@ -14,6 +14,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  ShieldCheck,
   Square,
   Target,
   Users,
@@ -1725,6 +1726,12 @@ export function AppsScreen() {
       title: "Files",
       detail: "PDFs, forms and filled copies",
       icon: FileText,
+    },
+    {
+      section: "approvals" as const,
+      title: "Approvals",
+      detail: "Approve merges and deploys, exact version by exact version",
+      icon: ShieldCheck,
     },
   ];
   return (

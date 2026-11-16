@@ -39,6 +39,7 @@ import {
   MuseApi,
   restoreStoredSession,
 } from "./src/api";
+import { ApprovalsScreen } from "./src/approvals";
 import { ChatScreen, WorkspaceTools } from "./src/chat";
 import { ComputerEntry } from "./src/computer";
 import { ComputerDraftProvider } from "./src/computer-drafts";
@@ -73,6 +74,10 @@ const titles: Partial<Record<Section, { title: string; subtitle: string }>> = {
   calendar: { title: "Calendar", subtitle: "Time for what matters." },
   browser: { title: "Browser", subtitle: "Your connected browsing sessions." },
   files: { title: "Files", subtitle: "Documents, forms and filled copies." },
+  approvals: {
+    title: "Approvals",
+    subtitle: "Version-exact decisions for merges, deploys and other restricted actions.",
+  },
 };
 export default function App() {
   const [token, setToken] = useState("");
@@ -317,14 +322,16 @@ function WorkspaceShell({
           ? BrowserScreen
           : section === "files"
             ? FilesScreen
-            : section === "activity"
-              ? AgentActivityScreen
-              : section === "ideas"
-                ? IdeasScreen
-                : section === "goals"
-                  ? GoalsScreen
-                  : AppsScreen;
-  const utility = ["mail", "calendar", "browser", "files"].includes(section);
+            : section === "approvals"
+              ? ApprovalsScreen
+              : section === "activity"
+                ? AgentActivityScreen
+                : section === "ideas"
+                  ? IdeasScreen
+                  : section === "goals"
+                    ? GoalsScreen
+                    : AppsScreen;
+  const utility = ["mail", "calendar", "browser", "files", "approvals"].includes(section);
   return (
     <>
       <WorkspaceTools />

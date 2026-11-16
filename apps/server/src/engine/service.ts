@@ -256,6 +256,9 @@ export class AgentService {
     await this.recordAudit(owner, "approval.created", "succeeded", { requests: 1 });
     return request;
   }
+  async listApprovals(owner: string): Promise<ApprovalRequest[]> {
+    return this.approvals.list(owner);
+  }
   async approval(
     owner: string,
     id: string,

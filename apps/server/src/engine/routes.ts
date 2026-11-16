@@ -273,6 +273,7 @@ export function agentRoutes(service: AgentService): Hono<{ Variables: { owner: s
     const body = approvalCreateSchema.parse(await c.req.json());
     return c.json(await service.createApproval(c.get("owner"), body), 201);
   });
+  app.get("/approvals", async (c) => c.json(await service.listApprovals(c.get("owner"))));
   app.get("/approvals/:id", async (c) =>
     c.json(await service.approval(c.get("owner"), c.req.param("id"))),
   );

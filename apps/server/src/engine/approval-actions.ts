@@ -140,6 +140,12 @@ export class ApprovalGate {
     }
   }
 
+  /** Every request for this owner, newest activity first (the client's list). */
+  async list(owner: string): Promise<ApprovalRequest[]> {
+    const records = await this.db.list<ApprovalRequest>(owner, APPROVAL_REQUEST_KIND);
+    return records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
   /** Talk to Arthur: discussion only — never approval state. */
   async postMessage(
     owner: string,

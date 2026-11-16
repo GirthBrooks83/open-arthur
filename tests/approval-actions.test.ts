@@ -378,3 +378,37 @@ test("routes: message cannot approve, exact-version control can, execute dispatc
   const again = await request(`/approvals/${created.id}/execute`, {});
   assert.equal(again.status, 409);
 });
+
+// --- List surface: the Approvals client's pending list (GET /approvals) ---
+
+test("gate.list returns the owner's requests, most recent activity first", async () => {
+  const db = await createStore();
+  try {
+    const { runners } = spyRunners();
+    const gate = new ApprovalGate(db, runners, async () => "fallback ran");
+    const first = await gate.create("owner", mergeV1);
+    const second = await gate.create("owner", deployV1);
+    await gate.create("someone-else", mergeV1);
+    // Touch the first request last: it must sort ahead of the second.
+    await gate.postMessage("owner", first.id, { from: "owner", text: "Any news?" });
+    const listed = await gate.list("owner");
+    assert.deepEqual(
+      listed.map((row) => row.id),
+      [first.id, second.id],
+    );
+    assert.equal(listed[0]?.discussion.length, 1);
+  } finally {
+    await db.close();
+  }
+});
+
+test("routes: GET /approvals lists the owner's requests with live status", async () => {
+  const created = await read<{ id: string }>("/approvals", deployV1, 201);
+  const listed = await read<{ id: string; status: string }[]>("/approvals", undefined, 200);
+  const row = listed.find((entry) => entry.id === created.id);
+  assert.ok(row);
+  assert.equal(row.status, "pending");
+  await read(`/approvals/${created.id}/control`, { control: "keep_pending" }, 200);
+  const after = await read<{ id: string; status: string }[]>("/approvals", undefined, 200);
+  assert.equal(after.find((entry) => entry.id === created.id)?.status, "pending");
+});
