@@ -198,8 +198,10 @@ export async function createApp(
         // Mem0, Graphiti and Hindsight are the lanes with real
         // adapters (engine/mem0.ts, engine/graphiti.ts,
         // engine/hindsight.ts): saves mirror to them and task recall
-        // merges their facts. The other lanes below remain
-        // configuration-only for now.
+        // merges their facts. AnythingLLM has a real adapter too
+        // (engine/anythingllm.ts): its live probe requires the
+        // service's own /api/ping answer, not mere reachability. The
+        // other lanes below remain configuration-only for now.
         mem0Wired: Boolean(config.integrations?.mem0Url),
         // Agent browser (Stagehand): the adapter ships in this
         // codebase (extract_web tool -> worker POST /extract), so
@@ -213,6 +215,7 @@ export async function createApp(
         hindsightWired: Boolean(config.integrations?.hindsightUrl),
         n8n: Boolean(config.integrations?.n8nUrl),
         anythingllm: Boolean(config.integrations?.anythingLlmUrl),
+        anythingllmWired: Boolean(config.integrations?.anythingLlmUrl),
       },
       integrationsLive: live.integrationsLive,
       browserLive: live.browserLive,
