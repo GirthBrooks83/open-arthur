@@ -31,7 +31,16 @@ import type { Config } from "../config.ts";
 //      variant (the same server's read-only mode, per GitHub's
 //      remote-server documentation) and additionally asks for the
 //      read-only toolset view (X-MCP-Readonly: true, X-MCP-Toolsets
-//      pinned to repos,issues,pull_requests,actions).
+//      pinned to repos,issues,pull_requests,actions) and lockdown
+//      mode (X-MCP-Lockdown: true — per the same documentation it
+//      hides public issue/PR content created by users without push
+//      access; GitHub calls it a best-effort content filter against
+//      prompt injection, explicitly NOT a security boundary).
+//   4. Repository pin: readTool — the only agent-facing entry —
+//      refuses any owner/repo other than GITHUB_EYES_PINNED_OWNER /
+//      GITHUB_EYES_PINNED_REPO before the transport is touched, so
+//      even a token that could read more can only ever be USED
+//      through this client to inspect the one repository.
 // Read access therefore cannot quietly become write access by
 // configuration drift: the allowlist is a constant in this file,
 // and the token Joseph supplies is itself fine-grained read-only
@@ -54,6 +63,13 @@ import type { Config } from "../config.ts";
 // this for tests / Enterprise hosting.
 export const GITHUB_MCP_DEFAULT_URL = "https://api.githubcopilot.com/mcp/readonly";
 export const GITHUB_MCP_TOOLSETS = "repos,issues,pull_requests,actions";
+
+// The one repository these eyes may ever inspect (Claude review of
+// PR #48: pin to the one repo before the token goes live). Enforced
+// in readTool, pre-transport; the comparison is case-insensitive
+// because GitHub names are.
+export const GITHUB_EYES_PINNED_OWNER = "GirthBrooks83";
+export const GITHUB_EYES_PINNED_REPO = "open-arthur";
 
 // The ONLY server tools this client will ever register or invoke.
 // Every entry is a pure read in the upstream server. Write tools
@@ -186,6 +202,7 @@ export class HttpMcpTransport implements McpTransport {
       // The in-code allowlist stays authoritative even if these
       // headers are ignored or the endpoint changes.
       "X-MCP-Readonly": "true",
+      "X-MCP-Lockdown": "true",
       "X-MCP-Toolsets": GITHUB_MCP_TOOLSETS,
       ...(this.sessionId ? { "Mcp-Session-Id": this.sessionId } : {}),
     };
@@ -457,23 +474,38 @@ export class GitHubEyes {
     return this.shapeResult(validate ? validate(result) : result);
   }
 
-  // Execute one agent-facing tool by name. Returns the shaped,
-  // size-capped result framed as untrusted external data
-  // (frameGitHubResult — GitHub content is never presented to
-  // the model as bare data), or { error } by value (the engine's
-  // tool wrapper treats an `error` string as a failed,
-  // non-grounding result — the same contract as the other lanes).
+  // Execute one agent-facing tool by name. Refuses any repository
+  // other than the pinned one (GITHUB_EYES_PINNED_*) before
+  // anything else happens. Returns the shaped, size-capped result
+  // framed as untrusted external data (frameGitHubResult — GitHub
+  // content is never presented to the model as bare data), or
+  // { error } by value (the engine's tool wrapper treats an
+  // `error` string as a failed, non-grounding result — the same
+  // contract as the other lanes).
   async readTool(name: GitHubEyesToolName, args: Record<string, unknown>): Promise<unknown> {
     try {
+      // Repository pin (layer 4 — see the module comment): every
+      // agent tool names a repository, and only the one pinned
+      // repository may be read. The refusal happens BEFORE any
+      // translation, connection or transport call, so a request
+      // for any other repository never leaves this process, even
+      // if the token itself could read it.
+      const owner = typeof args.owner === "string" ? args.owner.trim() : "";
+      const repo = typeof args.repo === "string" ? args.repo.trim() : "";
+      if (!owner || !repo) return { error: `${name} requires owner and repo` };
+      if (
+        owner.toLowerCase() !== GITHUB_EYES_PINNED_OWNER.toLowerCase() ||
+        repo.toLowerCase() !== GITHUB_EYES_PINNED_REPO.toLowerCase()
+      )
+        return {
+          error: `GitHub eyes are pinned to ${GITHUB_EYES_PINNED_OWNER}/${GITHUB_EYES_PINNED_REPO}; refusing to read ${owner}/${repo}`,
+        };
       const call = translateToolCall(name, args);
       if (name === "github_repo_overview") {
         // The overview resolves through a SEARCH (the hosted
         // toolset offers no direct get-repository read), and a
         // search payload is not proof of identity: validate the
         // exact repository before anything is presented.
-        const owner = typeof args.owner === "string" ? args.owner.trim() : "";
-        const repo = typeof args.repo === "string" ? args.repo.trim() : "";
-        if (!owner || !repo) return { error: "github_repo_overview requires owner and repo" };
         return frameGitHubResult(
           name,
           await this.callServerTool(call.serverTool, call.args, (result) =>

@@ -7,6 +7,8 @@ import { createApp } from "../apps/server/src/app.ts";
 import type { Config } from "../apps/server/src/config.ts";
 import { createStore, type Store } from "../apps/server/src/db.ts";
 import {
+  GITHUB_EYES_PINNED_OWNER,
+  GITHUB_EYES_PINNED_REPO,
   GITHUB_EYES_TOOL_NAMES,
   GITHUB_MCP_DEFAULT_URL,
   GITHUB_READ_ONLY_SERVER_TOOLS,
@@ -186,7 +188,10 @@ test("status levels: a failed handshake stays at configured with the error recor
   assert.equal(status.level, "configured");
   assert.equal(status.wired, false);
   assert.match(status.lastError ?? "", /handshake refused/);
-  const read = await eyes.readTool("github_list_branches", { owner: "o", repo: "r" });
+  const read = await eyes.readTool("github_list_branches", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
   assert.match((read as { error: string }).error, /not connected/);
 });
 
@@ -252,10 +257,14 @@ test("tools: agent tools translate to the right server calls", async () => {
     },
   });
 
-  await eyes.readTool("github_get_commit", { owner: "o", repo: "r", sha: "abc123" });
+  await eyes.readTool("github_get_commit", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+    sha: "abc123",
+  });
   assert.deepEqual(transport.calls.at(-1), {
     name: "get_commit",
-    args: { owner: "o", repo: "r", sha: "abc123", detail: "stats" },
+    args: { owner: "GirthBrooks83", repo: "open-arthur", sha: "abc123", detail: "stats" },
   });
 });
 
@@ -263,13 +272,16 @@ test("tools: an error result and an unknown view come back as { error }, never a
   const transport = new FakeTransport();
   transport.result = { isError: true, content: [{ type: "text", text: "404 Not Found" }] };
   const eyes = new GitHubEyes({ token: "test-token", transport });
-  const read = await eyes.readTool("github_list_issues", { owner: "o", repo: "r" });
+  const read = await eyes.readTool("github_list_issues", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
   assert.deepEqual(read, { error: "404 Not Found" });
   assert.equal(eyes.status().verified, false);
 
   const badView = await eyes.readTool("github_get_pull_request", {
-    owner: "o",
-    repo: "r",
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
     pullNumber: 1,
     view: "explode",
   });
@@ -283,8 +295,8 @@ test("tools: oversized results are capped with a truncation marker", async () =>
   };
   const eyes = new GitHubEyes({ token: "test-token", transport });
   const read = (await eyes.readTool("github_get_pull_request", {
-    owner: "o",
-    repo: "r",
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
     pullNumber: 47,
     view: "diff",
   })) as { data: { truncatedText: string } };
@@ -358,6 +370,7 @@ test("transport: handshake order, auth + read-only headers, session replay, JSON
   for (const call of calls) {
     assert.equal(call.headers.Authorization, "Bearer test-token");
     assert.equal(call.headers["X-MCP-Readonly"], "true");
+    assert.equal(call.headers["X-MCP-Lockdown"], "true");
     assert.equal(call.headers["X-MCP-Toolsets"], "repos,issues,pull_requests,actions");
   }
   // The session id issued at initialize is replayed afterwards.
@@ -540,7 +553,10 @@ test("failure: HTTP 401 on a tool call (expired/revoked token) is an error, neve
   const eyes = eyesOverFetch(
     (call) => handshakeOk(call) ?? new Response("unauthorized", { status: 401 }),
   );
-  const read = await eyes.readTool("github_list_branches", { owner: "o", repo: "r" });
+  const read = await eyes.readTool("github_list_branches", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
   assert.match((read as { error: string }).error, /HTTP 401/);
   const status = eyes.status();
   assert.equal(status.wired, true);
@@ -550,7 +566,10 @@ test("failure: HTTP 401 on a tool call (expired/revoked token) is an error, neve
 
 test("failure: HTTP 401 at the handshake leaves the level at configured", async () => {
   const eyes = eyesOverFetch(() => new Response("unauthorized", { status: 401 }));
-  const read = await eyes.readTool("github_list_branches", { owner: "o", repo: "r" });
+  const read = await eyes.readTool("github_list_branches", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
   assert.match((read as { error: string }).error, /not connected/);
   const status = eyes.status();
   assert.equal(status.level, "configured");
@@ -562,7 +581,10 @@ test("failure: HTTP 403 on a tool call is an error, never verified", async () =>
   const eyes = eyesOverFetch(
     (call) => handshakeOk(call) ?? new Response("forbidden", { status: 403 }),
   );
-  const read = await eyes.readTool("github_list_branches", { owner: "o", repo: "r" });
+  const read = await eyes.readTool("github_list_branches", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
   assert.match((read as { error: string }).error, /HTTP 403/);
   assert.equal(eyes.status().verified, false);
 });
@@ -571,7 +593,10 @@ test("failure: HTTP 500 (server error) on a tool call is an error, never verifie
   const eyes = eyesOverFetch(
     (call) => handshakeOk(call) ?? new Response("internal error", { status: 500 }),
   );
-  const read = await eyes.readTool("github_list_branches", { owner: "o", repo: "r" });
+  const read = await eyes.readTool("github_list_branches", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
   assert.match((read as { error: string }).error, /HTTP 500/);
   assert.equal(eyes.status().verified, false);
   assert.equal(eyes.status().level, "wired");
@@ -583,7 +608,10 @@ test("failure: a non-JSON MCP response is an error, never data", async () => {
       handshakeOk(call) ??
       new Response("this is not json", { status: 200, headers: { "content-type": "text/plain" } }),
   );
-  const read = await eyes.readTool("github_list_branches", { owner: "o", repo: "r" });
+  const read = await eyes.readTool("github_list_branches", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
   assert.match((read as { error: string }).error, /returned no result/);
   assert.equal(eyes.status().verified, false);
 });
@@ -597,7 +625,10 @@ test("failure: well-formed JSON that is not a JSON-RPC message is an error", asy
         headers: { "content-type": "application/json" },
       }),
   );
-  const read = await eyes.readTool("github_list_branches", { owner: "o", repo: "r" });
+  const read = await eyes.readTool("github_list_branches", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
   assert.match((read as { error: string }).error, /returned no result/);
   assert.equal(eyes.status().verified, false);
 });
@@ -611,7 +642,10 @@ test("failure: a null JSON-RPC result is a malformed-result error, never data", 
         headers: { "content-type": "application/json" },
       }),
   );
-  const read = await eyes.readTool("github_list_branches", { owner: "o", repo: "r" });
+  const read = await eyes.readTool("github_list_branches", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
   assert.match((read as { error: string }).error, /malformed result/);
   assert.equal(eyes.status().verified, false);
 });
@@ -629,7 +663,10 @@ test("failure: an MCP error object in a well-formed response is an error, never 
         { status: 200, headers: { "content-type": "application/json" } },
       ),
   );
-  const read = await eyes.readTool("github_list_branches", { owner: "o", repo: "r" });
+  const read = await eyes.readTool("github_list_branches", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
   assert.match((read as { error: string }).error, /server exploded/);
   assert.equal(eyes.status().verified, false);
 });
@@ -654,7 +691,10 @@ test("failure: a transport timeout is an error, never verified", async () => {
     timeoutMs: 25,
   });
   const eyes = new GitHubEyes({ token: "test-token", transport });
-  const read = await eyes.readTool("github_list_branches", { owner: "o", repo: "r" });
+  const read = await eyes.readTool("github_list_branches", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
   assert.match((read as { error: string }).error, /GitHub MCP request failed/);
   assert.equal(eyes.status().verified, false);
   assert.equal(eyes.status().level, "wired");
@@ -748,8 +788,8 @@ test("framing: instruction-like GitHub content comes back framed as untrusted, p
   };
   const eyes = new GitHubEyes({ token: "test-token", transport });
   const read = (await eyes.readTool("github_get_issue", {
-    owner: "o",
-    repo: "r",
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
     issue_number: 7,
   })) as FramedResult;
   assert.equal(read.untrusted, true);
@@ -765,8 +805,8 @@ test("framing: plain-text (non-JSON) results are framed too", async () => {
   transport.result = { content: [{ type: "text", text: INJECTION }] };
   const eyes = new GitHubEyes({ token: "test-token", transport });
   const read = (await eyes.readTool("github_list_issues", {
-    owner: "o",
-    repo: "r",
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
   })) as FramedResult;
   assert.equal(read.untrusted, true);
   assert.equal(read.source, "github (github_list_issues)");
@@ -777,24 +817,24 @@ test("framing: every one of the nine read tools frames its result", async () => 
   const argsFor = (name: GitHubEyesToolName): Record<string, unknown> => {
     switch (name) {
       case "github_get_commit":
-        return { owner: "o", repo: "r", sha: "abc123" };
+        return { owner: "GirthBrooks83", repo: "open-arthur", sha: "abc123" };
       case "github_get_pull_request":
-        return { owner: "o", repo: "r", pullNumber: 47 };
+        return { owner: "GirthBrooks83", repo: "open-arthur", pullNumber: 47 };
       case "github_get_issue":
-        return { owner: "o", repo: "r", issue_number: 7 };
+        return { owner: "GirthBrooks83", repo: "open-arthur", issue_number: 7 };
       default:
-        return { owner: "o", repo: "r" };
+        return { owner: "GirthBrooks83", repo: "open-arthur" };
     }
   };
   assert.equal(GITHUB_EYES_TOOL_NAMES.length, 9);
   for (const name of GITHUB_EYES_TOOL_NAMES) {
     const transport = new FakeTransport();
     // The overview validates an exact repository match before
-    // shaping, so its payload is a search result for o/r; every
+    // shaping, so its payload is a search result for the pinned repo; every
     // other tool takes the probe payload directly.
     transport.result =
       name === "github_repo_overview"
-        ? searchResult({ full_name: "o/r", description: "probe" })
+        ? searchResult({ full_name: "GirthBrooks83/open-arthur", description: "probe" })
         : { content: [{ type: "text", text: JSON.stringify({ probe: name }) }] };
     const eyes = new GitHubEyes({ token: "test-token", transport });
     const read = (await eyes.readTool(name, argsFor(name))) as FramedResult;
@@ -802,7 +842,7 @@ test("framing: every one of the nine read tools frames its result", async () => 
     assert.equal(read.source, `github (${name})`);
     assert.match(read.notice, /Untrusted external data from GitHub/);
     if (name === "github_repo_overview")
-      assert.deepEqual(read.data, { full_name: "o/r", description: "probe" });
+      assert.deepEqual(read.data, { full_name: "GirthBrooks83/open-arthur", description: "probe" });
     else assert.deepEqual(read.data, { probe: name });
   }
 });
@@ -811,7 +851,67 @@ test("framing: errors are not framed — the bare { error } contract holds", asy
   const transport = new FakeTransport();
   transport.result = { isError: true, content: [{ type: "text", text: INJECTION }] };
   const eyes = new GitHubEyes({ token: "test-token", transport });
-  const read = await eyes.readTool("github_list_issues", { owner: "o", repo: "r" });
+  const read = await eyes.readTool("github_list_issues", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
   assert.deepEqual(read, { error: INJECTION });
   assert.equal(eyes.status().verified, false);
+});
+
+// --- Repository pin (Claude review of PR #48: pin to the one repo) -------
+//
+// readTool is the only agent-facing entry, and it must refuse any
+// repository other than GirthBrooks83/open-arthur BEFORE the
+// transport is touched — the token Joseph supplies will itself be
+// scoped, but this client must never be usable as a general
+// GitHub reader, even with a broader token behind it.
+
+test("pin: the pinned constants name the one repository", () => {
+  assert.equal(GITHUB_EYES_PINNED_OWNER, "GirthBrooks83");
+  assert.equal(GITHUB_EYES_PINNED_REPO, "open-arthur");
+});
+
+test("pin: a request for any other repository is refused before the transport is touched", async () => {
+  const attempts: Array<[GitHubEyesToolName, Record<string, unknown>]> = [
+    ["github_list_branches", { owner: "GirthBrooks83", repo: "someone-elses-repo" }],
+    ["github_list_issues", { owner: "octocat", repo: "open-arthur" }],
+    ["github_get_issue", { owner: "octocat", repo: "hello-world", issue_number: 1 }],
+    ["github_repo_overview", { owner: "octocat", repo: "hello-world" }],
+    ["github_list_workflow_runs", { owner: "GirthBrooks83", repo: "openmuse" }],
+  ];
+  for (const [name, args] of attempts) {
+    const transport = new FakeTransport();
+    const eyes = new GitHubEyes({ token: "test-token", transport });
+    const read = (await eyes.readTool(name, args)) as { error: string };
+    assert.match(read.error, /pinned to GirthBrooks83\/open-arthur/, `${name} must refuse`);
+    assert.match(read.error, /refusing to read/, `${name} must refuse`);
+    // Refused pre-transport: no tool call ever left the client,
+    // and the refusal never counts as a verified read.
+    assert.equal(transport.calls.length, 0, `${name} must not reach the transport`);
+    assert.equal(eyes.status().verified, false);
+  }
+});
+
+test("pin: the pinned repository passes, case-insensitively", async () => {
+  const transport = new FakeTransport();
+  const eyes = new GitHubEyes({ token: "test-token", transport });
+  const read = (await eyes.readTool("github_list_branches", {
+    owner: "girthbrooks83",
+    repo: "Open-Arthur",
+  })) as FramedResult;
+  assert.equal(read.untrusted, true);
+  assert.deepEqual(read.data, { ok: true });
+  assert.equal(transport.calls.length, 1);
+  assert.equal(eyes.status().verified, true);
+});
+
+test("pin: missing owner or repo is refused, pre-transport", async () => {
+  const transport = new FakeTransport();
+  const eyes = new GitHubEyes({ token: "test-token", transport });
+  for (const args of [{}, { owner: "GirthBrooks83" }, { repo: "open-arthur" }]) {
+    const read = (await eyes.readTool("github_list_branches", args)) as { error: string };
+    assert.match(read.error, /github_list_branches requires owner and repo/);
+  }
+  assert.equal(transport.calls.length, 0);
 });
