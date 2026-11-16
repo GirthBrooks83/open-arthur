@@ -59,6 +59,41 @@ test("requiresEvidence separates factual/recall claims from general instructions
   assert.equal(requiresEvidence(""), false);
 });
 
+// Round 3 (Claude review of PR #47): the classifier's anchored
+// patterns missed the request forms people actually type — polite
+// and modal lead-ins ("Can you tell me…", "Please tell me…") put a
+// wrapper word where the patterns expected the verb or question
+// word. The gate now judges the request's core, and the tell-me
+// form gates when it asks to be told a fact — while chit-chat and
+// creative asks stay ungated.
+test("requiresEvidence covers polite and modal request forms without gating chit-chat", () => {
+  // Claude's named misses, verbatim forms.
+  assert.equal(requiresEvidence("Can you tell me today's weather?"), true);
+  assert.equal(requiresEvidence("Please tell me the latest news"), true);
+  // The same wrappers over the other gated shapes.
+  assert.equal(requiresEvidence("Please tell me when the meeting starts"), true);
+  assert.equal(requiresEvidence("Can you tell me what time it is in Tokyo?"), true);
+  assert.equal(requiresEvidence("Could you please tell me what my tasks are?"), true);
+  assert.equal(requiresEvidence("Would you show me my calendar?"), true);
+  assert.equal(requiresEvidence("Please list my open tasks"), true);
+  assert.equal(requiresEvidence("Could you check the current price of Bitcoin?"), true);
+  // Tell-me fact requests with no topic-signal word (round 3 rule).
+  assert.equal(requiresEvidence("Can you tell me the capital of France?"), true);
+  assert.equal(requiresEvidence("Please tell me about the meeting"), true);
+  // Negative: politeness alone never gates — creative asks and
+  // general instructions keep shipping ungated behind the wrapper.
+  assert.equal(requiresEvidence("Can you tell me a joke?"), false);
+  assert.equal(requiresEvidence("Please tell me a story about a dragon"), false);
+  assert.equal(requiresEvidence("Can you write me a poem about autumn?"), false);
+  assert.equal(requiresEvidence("Please help me draft an email to my landlord"), false);
+  assert.equal(requiresEvidence("Can you help me fix this paragraph?"), false);
+  // Negative: plain chit-chat stays ungated.
+  assert.equal(requiresEvidence("Hello!"), false);
+  assert.equal(requiresEvidence("Good morning"), false);
+  assert.equal(requiresEvidence("How are you?"), false);
+  assert.equal(requiresEvidence("Thanks!"), false);
+});
+
 type Reply = Parameters<typeof modelFixture>[1];
 
 async function startTask(t: TestContext, reply: Reply, prompt: string) {

@@ -275,9 +275,34 @@ export function critiqueAnswer(
 export function requiresEvidence(prompt: string): boolean {
   const text = prompt.trim().toLowerCase();
   if (!text) return false;
+  // Pure small talk (round 3): a greeting or pleasantry that is the
+  // WHOLE prompt asserts nothing and stays ungated. The guard is
+  // anchored at both ends so "Hello, what is my balance?" still
+  // reaches the factual checks below.
+  if (
+    /^(hi|hello|hey|good (morning|afternoon|evening)|thanks|thank you|how are you( doing)?|how'?s it going)[\s!.?]*$/.test(
+      text,
+    )
+  )
+    return false;
+  // Polite and modal lead-ins (round 3, Claude review of PR #47):
+  // the anchored checks below judge the request's CORE, so strip
+  // the wrappers people actually type — "Please tell me…", "Can you
+  // tell me…", "Could you please check…" — before matching them.
+  // The strip removes only the wrapper; the core still has to match
+  // a gated pattern on its own, so politeness alone never gates
+  // ("Can you write me a poem?" stays ungated).
+  const core = text.replace(
+    /^(please[,\s]+)?((can|could|would|will)\s+you\s+)?(please[,\s]+)?/,
+    "",
+  );
   // A question asking for a fact: the completion asserts an answer.
-  if (/^(what|when|where|who|whom|whose|which|why|how)\b/.test(text)) return true;
-  if (/^(is|are|was|were|do|does|did|have|has)\b/.test(text) && text.includes("?")) return true;
+  if (/^(what|when|where|who|whom|whose|which|why|how)\b/.test(core)) return true;
+  if (
+    /^(is|are|was|were|do|does|did|have|has|can|could|will|would|should|may|might)\b/.test(core) &&
+    core.includes("?")
+  )
+    return true;
   // Recall of stored facts, however phrased.
   if (/\b(remind me|do you remember|remember when)\b/.test(text)) return true;
   if (
@@ -288,7 +313,7 @@ export function requiresEvidence(prompt: string): boolean {
     return true;
   if (/\bmy (calendar|events?|name|address|phone|accounts?)\b/.test(text)) return true;
   // Imperatives that ask to report stored state ("List my tasks").
-  if (/^(list|show|find|report)\b/.test(text) && /\bmy\b/.test(text)) return true;
+  if (/^(list|show|find|report)\b/.test(core) && /\bmy\b/.test(core)) return true;
   // Factual imperatives (round 2, ATLAS review of PR #47): an
   // information-fetch lead verb ("Tell me today's weather", "Give
   // me the current price of Bitcoin") asserts a world fact exactly
@@ -302,10 +327,28 @@ export function requiresEvidence(prompt: string): boolean {
   // and stay ungated, as do fetching verbs aimed at supplied or
   // creative content ("Check this draft", "Get me a coffee").
   if (
-    /^(tell|give|show|check|fetch|get|find|search|report|look up|find out)\b/.test(text) &&
+    /^(tell|give|show|check|fetch|get|find|search|report|look up|find out)\b/.test(core) &&
     /\b(today|todays|current|currently|latest|now|tonight|tomorrow|yesterday|weather|forecast|price|prices|pricing|news|headlines?|scores?|stock|stocks|temperature|exchange rate)\b/.test(
-      text,
+      core,
     )
+  )
+    return true;
+  // "Tell me" fact requests without a topic signal (round 3): the
+  // round-2 signal requirement guards creative objects, but a
+  // request to be TOLD a fact — "Can you tell me the capital of
+  // France?", "Please tell me when the meeting starts" — asserts a
+  // world fact with no signal word in it. Gate the tell-me form
+  // when it embeds a question word or asks for a definite thing
+  // ("tell me the…", "tell me about the…"), unless the thing asked
+  // for is a creative work (a joke, a story, a poem) — those stay
+  // ungated, like round 2's examples.
+  if (
+    /\btell me\b/.test(core) &&
+    !/\b(jokes?|story|stories|poems?|poetry|songs?|tales?|riddles?|limericks?|haiku)\b/.test(
+      core,
+    ) &&
+    (/\b(what|when|where|who|whom|whose|which|why|how)\b/.test(core) ||
+      /\btell me (the|about the)\b/.test(core))
   )
     return true;
   return false;
