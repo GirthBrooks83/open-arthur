@@ -78,6 +78,11 @@ export function TodayScreen() {
     .sort((a, b) => a.start.localeCompare(b.start));
   return (
     <View style={{ gap: 25 }}>
+      {w.notices.map((notice) => (
+        <Card key={notice.source} style={{ padding: 16 }}>
+          <Text style={s.muted}>{notice.message}</Text>
+        </Card>
+      ))}
       <View
         style={[
           {
@@ -499,6 +504,13 @@ export function MailScreen() {
         </Button>
       </View>
       <ErrorNotice error={error} />
+      {w.notices
+        .filter((notice) => notice.source === "mail")
+        .map((notice) => (
+          <Card key={notice.source} style={{ padding: 16 }}>
+            <Text style={s.muted}>{notice.message}</Text>
+          </Card>
+        ))}
       <Card>
         <View style={[s.row, { gap: 10, marginBottom: 15, flexWrap: "wrap" }]}>
           <Button small primary={tab === "all"} onPress={() => setTab("all")}>

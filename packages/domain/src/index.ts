@@ -162,6 +162,15 @@ export interface ActivityEntry {
   status: string;
   actionId?: string;
 }
+/**
+ * A human-worded note that one part of the workspace could not be
+ * loaded this time. The message is authored by the server for the
+ * owner — it never carries a provider's raw error wording.
+ */
+export interface WorkspaceNotice {
+  source: "mail" | "events";
+  message: string;
+}
 export interface Connection {
   id: string;
   name: string;
@@ -174,6 +183,8 @@ export interface Workspace {
   profile: { name: string; email: string };
   mail: Mail[];
   events: CalendarEvent[];
+  /** Parts of the workspace that are temporarily unavailable (human wording). */
+  notices: WorkspaceNotice[];
   files: Artifact[];
   browsers: BrowserSession[];
   actions: ActionProposal[];
