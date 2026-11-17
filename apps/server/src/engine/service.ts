@@ -34,6 +34,14 @@ import type { Files } from "../files.ts";
 import { backgroundFailure } from "../log.ts";
 import type { WorkspaceService } from "../workspace.ts";
 import { type AnythingLlmLane, anythingLlmLaneFor } from "./anythingllm.ts";
+import { type ApprovalActionRunners, ApprovalGate } from "./approval-actions.ts";
+import type {
+  ApprovalControl,
+  ApprovalRequest,
+  DiscussionMessage,
+  ProposalVersion,
+} from "./approval-center.ts";
+import type { ExecutionRecord } from "./approval-executor.ts";
 import { type AuditEvent, AuditLog, type AuditOutcome } from "./audit.ts";
 import { type ConsultRecord, closeConsultByThread } from "./consults.ts";
 import {
@@ -186,6 +194,13 @@ export class AgentService {
   // SLACK_BRIEF_CHANNEL are set; failure-swallowing by value, like
   // the memory lanes.
   readonly briefSlack: SlackBriefPoster;
+  // Approval Center (engine/approval-center.ts + approval-executor.ts,
+  // gated by engine/approval-actions.ts): version-exact owner approvals
+  // for restricted actions. Merges and deploys are the first call sites
+  // routed through the executor; their runners can be injected here,
+  // and the default runner dispatches an agent task carrying the exact
+  // approved version's text (see dispatchApprovedAction).
+  readonly approvals: ApprovalGate;
   // GitHub eyes (engine/github-eyes.ts): read-only GitHub inspection
   // via the official hosted GitHub MCP server. Configured only when
   // GITHUB_MCP_TOKEN is set; connects lazily on first tool use, and
@@ -201,6 +216,7 @@ export class AgentService {
     readonly actions: ActionService,
     readonly browser: BrowserService,
     readonly computer: ComputerService = new ComputerService(db, config),
+    approvalRunners: ApprovalActionRunners = {},
   ) {
     this.mem0 = mem0LaneFor(config);
     this.graphiti = graphitiLaneFor(config);
@@ -208,6 +224,9 @@ export class AgentService {
     this.anythingllm = anythingLlmLaneFor(config);
     this.auditLog = new AuditLog(db);
     this.briefSlack = dailyBriefSlackFor(config);
+    this.approvals = new ApprovalGate(db, approvalRunners, (owner, version) =>
+      this.dispatchApprovedAction(owner, version),
+    );
     this.githubEyes = githubEyesFor(config);
     this.worker = new TaskWorker(db, (owner, task, context) => this.execute(owner, task, context), {
       settled: async (owner, task) => {
@@ -260,6 +279,74 @@ export class AgentService {
   // (the read surface the /api/agent/audit route serves).
   async auditEvents(owner: string, limit = 50): Promise<AuditEvent[]> {
     return this.auditLog.events(owner, limit);
+  }
+  // --- Approval Center (engine/approval-actions.ts) ---
+  // Version-exact owner approvals for restricted actions. The gate
+  // owns persistence and the executor call sites; these methods are
+  // the service surface the /api/agent/approvals routes serve.
+  async createApproval(
+    owner: string,
+    input: { title: string; action: string; details: string; evidence?: string },
+  ): Promise<ApprovalRequest> {
+    const request = await this.approvals.create(owner, input);
+    await this.recordAudit(owner, "approval.created", "succeeded", { requests: 1 });
+    return request;
+  }
+  async approval(
+    owner: string,
+    id: string,
+  ): Promise<{ request: ApprovalRequest; executions: ExecutionRecord[] }> {
+    return this.approvals.get(owner, id);
+  }
+  async postApprovalMessage(
+    owner: string,
+    id: string,
+    input: { from: string; text: string },
+  ): Promise<{ message: DiscussionMessage; request: ApprovalRequest }> {
+    return this.approvals.postMessage(owner, id, input);
+  }
+  async reviseApproval(
+    owner: string,
+    id: string,
+    input: { action: string; details: string; evidence?: string },
+  ): Promise<ApprovalRequest> {
+    const request = await this.approvals.revise(owner, id, input);
+    await this.recordAudit(owner, "approval.revised", "succeeded", { requests: 1 });
+    return request;
+  }
+  async controlApproval(
+    owner: string,
+    id: string,
+    control: ApprovalControl,
+    opts?: { version?: number; note?: string },
+  ): Promise<ApprovalRequest> {
+    const request = await this.approvals.control(owner, id, control, opts);
+    if (control === "approve_exact_version")
+      await this.recordAudit(owner, "approval.approved", "succeeded", { requests: 1 });
+    return request;
+  }
+  // Execute a restricted action (merge / deploy) through the approval
+  // executor. Refuses unless the exact current version is approved.
+  async executeApproval(owner: string, id: string): Promise<ExecutionRecord> {
+    const record = await this.approvals.execute(owner, id);
+    await this.recordAudit(owner, "approval.executed", "succeeded", { executions: 1 });
+    return record;
+  }
+  // The default restricted-action runner: this app's only execution
+  // channel for external work is an agent task, so an approved merge
+  // or deploy dispatches a task whose prompt is the approved version's
+  // exact action + details (plus its evidence). The task — not the
+  // approval layer — performs the work, under the usual task rules.
+  private async dispatchApprovedAction(owner: string, version: ProposalVersion): Promise<string> {
+    const task = await this.createTask(owner, {
+      title: `Approved ${version.action} (v${version.version})`,
+      prompt:
+        `Carry out this owner-approved ${version.action} exactly as approved ` +
+        `(approval version ${version.version}, content hash ${version.contentHash}):\n\n` +
+        `${version.details}` +
+        (version.evidence ? `\n\nEvidence: ${version.evidence}` : ""),
+    });
+    return `dispatched as task ${task.id}`;
   }
   // --- Nightly distillation (engine/distillation.ts, PR-delta) ---
   // The core pass is shared by the manual trigger and the scheduled
