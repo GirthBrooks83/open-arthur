@@ -10,6 +10,7 @@ import {
   Lightbulb,
   ListChecks,
   Mail,
+  Newspaper,
   Pause,
   Play,
   Plus,
@@ -1725,6 +1726,12 @@ export function AppsScreen() {
       title: "Files",
       detail: "PDFs, forms and filled copies",
       icon: FileText,
+    },
+    {
+      section: "news" as const,
+      title: "News",
+      detail: "News briefings, newest first",
+      icon: Newspaper,
     },
   ];
   return (

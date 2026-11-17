@@ -17,7 +17,14 @@ test("real Chromium cleans failed profiles and restores a saved UUID after worke
   const id = randomUUID();
   const failedId = randomUUID();
   try {
+    const fixtureHitsBefore = fixture.hits();
     await assert.rejects(browser.create(failedId, fixture.url), { code: "NAVIGATION_FAILED" });
+    assert.equal(
+      fixture.hits(),
+      fixtureHitsBefore + 1,
+      "the rejected navigation must have hit the redirect fixture exactly once — " +
+        "a NAVIGATION_FAILED with no fixture hit proves nothing about the redirect guard",
+    );
     assert.equal(browser.list().length, 0, "failed creation must release its saved-profile slot");
     assert.equal(
       (await readdir(dataDir)).includes(failedId),

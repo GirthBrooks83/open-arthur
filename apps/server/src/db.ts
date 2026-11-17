@@ -74,6 +74,59 @@ export class Store {
     );
     return result.rows.map((row) => row.data as { owner: string; value: T });
   }
+  // Filtered scan: only records whose JSON field equals the given
+  // value. Same row shape and ordering as scan(); the filter runs in
+  // SQL so non-matching payloads never leave the database (Supabase
+  // egress fix — see scanDueTasks). `field` is interpolated into the
+  // query as an identifier-like operand, so it is restricted to a
+  // plain key name; callers pass literals only.
+  async scanByField<T>(
+    kind: string,
+    field: string,
+    equals: string,
+  ): Promise<{ owner: string; value: T }[]> {
+    if (!/^[A-Za-z][A-Za-z0-9]*$/.test(field)) throw new Error(`Invalid field name: ${field}`);
+    const result = await this.db.query(
+      "SELECT jsonb_build_object('owner',owner,'value',data) AS data FROM records WHERE kind=$1 AND data->>$2=$3 ORDER BY updated_at ASC",
+      [kind, field, equals],
+    );
+    return result.rows.map((row) => row.data as { owner: string; value: T });
+  }
+  // The task worker's due-work query (Supabase egress fix F1): the
+  // subset of the tasks kind the worker tick can act on, selected in
+  // SQL instead of downloading the whole kind every poll. The
+  // predicate mirrors the tick's in-memory filters in
+  // engine/worker.ts exactly:
+  //   - status queued or waiting_approval (always actionable), or
+  //   - status scheduled with nextRunAt <= now, or
+  //   - status running with leaseUntil <= now (expired lease), or
+  //   - a monitor task still marked running with no leaseUntil —
+  //     the tick's crashed-run pass resolves those even though the
+  //     due filter's Date.parse("") comparison never matches them.
+  // Timestamps in this store are written by Date#toISOString()
+  // (canonical fixed-width UTC), so for values matching the guard
+  // pattern a lexicographic comparison IS the chronological one the
+  // tick's Date.parse(...) <= now performs. The guard keeps
+  // malformed values out without a cast — a cast could throw on a
+  // bad row and stall every tick, where Date.parse just yields NaN
+  // and the record is skipped, as it is here.
+  async scanDueTasks<T>(now: string): Promise<{ owner: string; value: T }[]> {
+    const timestamp =
+      "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?Z$";
+    const result = await this.db.query(
+      `SELECT jsonb_build_object('owner',owner,'value',data) AS data FROM records
+       WHERE kind='tasks' AND (
+         data->>'status' IN ('queued','waiting_approval')
+         OR (data->>'status'='scheduled' AND data->>'nextRunAt' ~ $2 AND data->>'nextRunAt' <= $1)
+         OR (data->>'status'='running' AND (
+           (data->>'leaseUntil' ~ $2 AND data->>'leaseUntil' <= $1)
+           OR (data->>'kind'='monitor' AND (data->>'leaseUntil' IS NULL OR data->>'leaseUntil'=''))
+         ))
+       ) ORDER BY updated_at ASC`,
+      [now, timestamp],
+    );
+    return result.rows.map((row) => row.data as { owner: string; value: T });
+  }
   async claim<T>(owner: string, id: string, status: string, now: string): Promise<T | null> {
     const result = await this.db.query(
       `UPDATE records AS action SET data=jsonb_set(data,'{status}',$4::jsonb),updated_at=now()
@@ -129,6 +182,11 @@ export async function createStore(
   }
   await database.query(
     "CREATE TABLE IF NOT EXISTS records(owner text NOT NULL,kind text NOT NULL,id text NOT NULL,data jsonb NOT NULL,updated_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(owner,kind,id))",
+  );
+  // Partial expression index backing Store.scanDueTasks: status
+  // lookups over the tasks kind only (Supabase egress fix F1).
+  await database.query(
+    "CREATE INDEX IF NOT EXISTS records_tasks_status_idx ON records ((data->>'status')) WHERE kind='tasks'",
   );
   return new Store(database);
 }

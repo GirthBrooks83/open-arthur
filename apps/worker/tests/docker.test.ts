@@ -52,6 +52,7 @@ test("Docker Chromium opens public sites, renders, navigates and restores its sa
     });
     assert.equal(blocked.status, 400);
     const redirectUrl = fixture.url;
+    const fixtureHitsBeforeSource = fixture.hits();
     const redirectSource = await fetch(redirectUrl, { redirect: "manual" });
     assert.equal(
       redirectSource.status,
@@ -59,12 +60,24 @@ test("Docker Chromium opens public sites, renders, navigates and restores its sa
       "self-hosted redirect fixture must return a real redirect",
     );
     assert.equal(redirectSource.headers.get("location"), REDIRECT_TARGET);
+    assert.equal(
+      fixture.hits(),
+      fixtureHitsBeforeSource + 1,
+      "the direct check must have hit the redirect fixture exactly once",
+    );
+    const fixtureHitsBeforeNavigate = fixture.hits();
     const redirect = await fetch(`${base}/sessions/${id}/navigate`, {
       headers,
       method: "POST",
       body: JSON.stringify({ url: redirectUrl }),
     });
     assert.equal(redirect.status, 502, "redirect to worker loopback must be blocked");
+    assert.equal(
+      fixture.hits(),
+      fixtureHitsBeforeNavigate + 1,
+      "the worker's navigation must have hit the redirect fixture exactly once — " +
+        "a 502 with no fixture hit proves nothing about the redirect guard",
+    );
     await api(`/sessions/${id}/navigate`, {
       url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
     });

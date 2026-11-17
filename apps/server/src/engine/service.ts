@@ -21,6 +21,7 @@ import type {
   Artifact,
   BrowserSession,
   Mail,
+  NewsBriefing,
   ProposalInput,
 } from "../../../../packages/domain/src/index.ts";
 import type { ActionService } from "../actions.ts";
@@ -73,10 +74,16 @@ import {
   scheduledDistillationDate,
 } from "./distillation.ts";
 import { analyzeSpending } from "./finance.ts";
+import { type GitHubEyes, githubEyesFor } from "./github-eyes.ts";
 import { type GraphitiLane, graphitiLaneFor } from "./graphiti.ts";
 import { type HindsightLane, hindsightLaneFor } from "./hindsight.ts";
 import { type Mem0Lane, mem0LaneFor } from "./mem0.ts";
 import { executeModelTask, UNCONFIRMED_RUN_QUESTION } from "./model.ts";
+import {
+  addNewsBriefing as fileNewsBriefing,
+  listNewsBriefings,
+  type NewsBriefingInput,
+} from "./news.ts";
 import {
   approvePendingSkillWrite,
   listPendingSkillWrites,
@@ -100,11 +107,13 @@ import {
   type SkillSummary,
 } from "./skills.ts";
 import {
+  CRITIC_BLOCKED_REASON,
   citedIds,
   createPlan,
   critiqueAnswer,
   type EvidenceBundle,
   INSUFFICIENT_EVIDENCE,
+  requiresEvidence,
   type StageTrace,
   survivingMatches,
   VERIFICATION_FAILED,
@@ -116,6 +125,14 @@ import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
 // Verifier stage: the run saved or changed something durable, so its
 // completion is checked before it ships (see applyVerifierSpine).
 export const MUTATING_TOOLS = new Set(["save_memory", "save_artifact", "fill_pdf", "skill_manage"]);
+
+// Tools that never count as ATTEMPTED work for the Critic gate's
+// scope (D1, see applyVerifierSpine): finish_task is the claim being
+// checked, ask_user ends the run with a question, and set_plan is
+// planning, not work. A prepare_* call DOES count when attempted: if
+// it failed and the run then claims the prepared outcome anyway,
+// that claim needs evidence like any other tool report.
+const NON_WORK_TOOLS = new Set(["finish_task", "ask_user", "set_plan"]);
 
 // Bounded auto-continue (ATLAS audit 2026-11-06, Priority 1): the
 // follow-up instruction the service itself issues — through the same
@@ -138,6 +155,10 @@ const terminal = new Set([
   "succeeded",
   "failed",
   "cancelled",
+  // Terminal Critic block (D1): the evidence gate ended the task
+  // with a reason on the record; it is never auto-resumed — the
+  // remedy is a new task, named in the reason itself.
+  "blocked",
   // Cron-semantics terminal states for scheduled runs (engine/cron.ts).
   "blocked_config",
   "delivery_failed",
@@ -174,6 +195,11 @@ export class AgentService {
   // and the default runner dispatches an agent task carrying the exact
   // approved version's text (see dispatchApprovedAction).
   readonly approvals: ApprovalGate;
+  // GitHub eyes (engine/github-eyes.ts): read-only GitHub inspection
+  // via the official hosted GitHub MCP server. Configured only when
+  // GITHUB_MCP_TOKEN is set; connects lazily on first tool use, and
+  // read-only is enforced by an in-code allowlist, not by the token.
+  readonly githubEyes: GitHubEyes;
   private maintenance?: ReturnType<typeof setInterval>;
   private refreshing = false;
   constructor(
@@ -194,6 +220,7 @@ export class AgentService {
     this.approvals = new ApprovalGate(db, approvalRunners, (owner, version) =>
       this.dispatchApprovedAction(owner, version),
     );
+    this.githubEyes = githubEyesFor(config);
     this.worker = new TaskWorker(db, (owner, task, context) => this.execute(owner, task, context), {
       settled: async (owner, task) => {
         await this.recordTaskOutcome(owner, task);
@@ -232,7 +259,9 @@ export class AgentService {
       if (task.state.verificationFailed)
         await this.recordAudit(owner, "task.verification_failed", "failed", counts);
       else await this.recordAudit(owner, "task.failed", "failed", counts);
-    } else if (task.status === "paused" && task.state.criticBlocked)
+    } else if ((task.status === "blocked" || task.status === "paused") && task.state.criticBlocked)
+      // "blocked" is the D1 terminal state; "paused" covers records
+      // parked by the pre-D1 gate, which keep auditing the same way.
       await this.recordAudit(owner, "task.critic_blocked", "denied", counts);
     else if (task.status === "blocked_config")
       await this.recordAudit(owner, "cron.blocked_config", "denied", counts);
@@ -885,6 +914,18 @@ export class AgentService {
     const briefs = await this.db.list<DailyBrief>(owner, DAILY_BRIEF_KIND);
     return briefs.slice(0, Math.max(1, Math.min(100, limit)));
   }
+  // --- News (engine/news.ts) ---
+  // Filed news editions: the add path is the filing lane's write
+  // surface, the list path is the News page's read surface. No
+  // computation and no audit fanfare — an edition is content the
+  // owner asked to have filed, like a memory write.
+  async addNewsBriefing(owner: string, input: NewsBriefingInput): Promise<NewsBriefing> {
+    return fileNewsBriefing(this.db, owner, input);
+  }
+  // Recent filed editions for this owner, newest first.
+  async newsBriefings(owner: string, limit = 20): Promise<NewsBriefing[]> {
+    return listNewsBriefings(this.db, owner, limit);
+  }
   // Ensure the morning scheduled brief job exists: a worker task
   // (kind "agent", input.dailyBrief) created idempotently under
   // the key `daily-brief` and parked in `scheduled` with the next
@@ -1069,9 +1110,15 @@ export class AgentService {
     this.worker.start();
     // Maintenance is independent of the HTTP response and reconciles durable records.
     void this.maintain().catch((error) => backgroundFailure("initial maintenance", error));
+    // 5 minutes, not 60 s (Supabase egress fix F3): every cycle
+    // still full-scans the tasks kind for outcome recovery (see
+    // maintain()), and all four reconciliations are delay-tolerant
+    // background work — monitor activation is also driven
+    // synchronously by controlMonitor, and the ideas refresh
+    // already tolerates 15 minutes of staleness.
     this.maintenance = setInterval(() => {
       void this.maintain().catch((error) => backgroundFailure("maintenance", error));
-    }, 60000);
+    }, 300000);
   }
   async stop() {
     if (this.maintenance) clearInterval(this.maintenance);
@@ -1084,11 +1131,26 @@ export class AgentService {
     this.refreshing = true;
     try {
       // Recover publications if the process exited after committing an outcome.
+      // This scan stays unfiltered (Supabase egress fix F3): the set
+      // publishOutcome can act on spans most statuses — including
+      // the terminal ones that accumulate until task retention
+      // exists — gated on state.notice/error combinations a status
+      // filter cannot express, so a filtered query would transfer
+      // nearly the same payload while risking a missed recovery.
+      // Its cost is cut by the 5-minute maintenance interval below;
+      // the other three scans have exact filters and use them.
       for (const { owner, value } of await this.db.scan<AgentTask>("tasks"))
         await this.publishOutcome(owner, value);
-      for (const { owner, value } of await this.db.scan<Monitor>("monitors"))
+      // activateMonitor's first check is status "active" — filter
+      // in SQL so inactive monitors never leave the database.
+      for (const { owner, value } of await this.db.scanByField<Monitor>(
+        "monitors",
+        "status",
+        "active",
+      ))
         await this.activateMonitor(owner, value);
-      for (const { owner, value } of await this.db.scan<Idea>("ideas"))
+      // Idea recovery below only acts on accepted ideas.
+      for (const { owner, value } of await this.db.scanByField<Idea>("ideas", "status", "accepted"))
         if (
           value.status === "accepted" &&
           value.taskId &&
@@ -1104,9 +1166,11 @@ export class AgentService {
               `idea-recovery:${value.id}`,
             );
           });
-      for (const { owner, value } of await this.db.scan<{ id: string; lastIdeasAt?: string }>(
-        "agent-settings",
-      )) {
+      // The settings loop below only ever reads the identity record.
+      for (const { owner, value } of await this.db.scanByField<{
+        id: string;
+        lastIdeasAt?: string;
+      }>("agent-settings", "id", "identity")) {
         if (value.id !== "identity") continue;
         if (!value.lastIdeasAt || Date.now() - Date.parse(value.lastIdeasAt) > 15 * 60000)
           await this.refreshIdeas(owner).catch(async () => {
@@ -1897,10 +1961,17 @@ export class AgentService {
   //   path (internal store -> Mem0 -> Graphiti -> Hindsight, the
   //   recallMemories merge order, filtered by the 0.75 coverage
   //   threshold) or from the task's own evidence, OR >=1 successful
-  //   tool result in the run. Not grounded: the completion is NOT
-  //   shipped — the task parks paused ("blocked") with the fixed
-  //   insufficient-evidence refusal as its result, resumable by the
-  //   user like any paused task.
+  //   tool result in the run. The gate is SCOPED (D1): it applies
+  //   only when the completion makes a claim that needs backing —
+  //   the prompt is a factual/recall request (verifier.ts
+  //   requiresEvidence), or the run attempted work tools and is
+  //   reporting on their outcomes. A general instruction outside
+  //   that scope ships ungrounded; the gate has nothing to check.
+  //   In scope and not grounded: the completion is NOT shipped —
+  //   the task ends terminally "blocked" with the fixed
+  //   insufficient-evidence refusal as its result and the
+  //   human-readable reason (CRITIC_BLOCKED_REASON) as its error,
+  //   instead of the old silent park at paused with question=null.
   // - Verifier (write tasks only — a mutating tool succeeded): the
   //   completion must be non-empty, every citation it makes must name
   //   a source from the EvidenceBundle, and every save_memory write
@@ -1956,6 +2027,18 @@ export class AgentService {
     // A run resumed from an approved action carries that action's
     // result in state — a successful result in the run, for grounding.
     const successfulToolResults = toolResults.length + (fresh.state.approvalResult ? 1 : 0);
+    // The gate's scope (D1): the prompt's own shape, plus the tools
+    // this run (and any run it resumed from) actually attempted —
+    // a completion reporting work-tool outcomes needs backing even
+    // when the prompt reads as a plain instruction.
+    const attemptedTools = [
+      ...new Set([
+        ...((stateOf(runResult).attemptedTools as string[] | undefined) ?? []),
+        ...((fresh.state.attemptedTools as string[] | undefined) ?? []),
+      ]),
+    ];
+    const attemptedWorkTools = attemptedTools.filter((name) => !NON_WORK_TOOLS.has(name));
+    const gateApplies = requiresEvidence(task.prompt) || attemptedWorkTools.length > 0;
     const critique = critiqueAnswer(task.prompt, bundle, successfulToolResults);
     const documentCount = new Set(bundle.matches.map((match) => match.source)).size;
     const trace: StageTrace[] = [
@@ -1976,16 +2059,20 @@ export class AgentService {
       {
         sequence: 3,
         agent: "critic",
-        outcome: !unconfirmed && critique.grounded ? "completed" : "blocked",
+        outcome: !unconfirmed && (critique.grounded || !gateApplies) ? "completed" : "blocked",
         summary: unconfirmed
           ? "Blocked the run because it ended without confirming completion."
           : critique.grounded
             ? "Approved the evidence for grounded completion."
-            : "Blocked unsupported completion because no matching evidence was found.",
+            : gateApplies
+              ? "Blocked unsupported completion because no matching evidence was found."
+              : "The evidence gate does not apply to this general task, so no evidence was required.",
         metrics: {
-          approved: !unconfirmed && critique.grounded,
+          approved: !unconfirmed && (critique.grounded || !gateApplies),
           query_coverage: critique.queryCoverage,
           tool_result_count: successfulToolResults,
+          evidence_gate: gateApplies,
+          attempted_tool_count: attemptedWorkTools.length,
           ...(unconfirmed ? { unconfirmed: true } : {}),
         },
       },
@@ -2007,17 +2094,23 @@ export class AgentService {
       outcome: "completed",
       summary: critique.grounded
         ? "Produced the completion from approved evidence."
-        : "Returned the insufficient-evidence response.",
+        : gateApplies
+          ? "Returned the insufficient-evidence response."
+          : "Produced the completion for a general task the evidence gate does not cover.",
       metrics: { answer_chars: answer.length, citation_count: citedIds(answer).length },
     });
     const mergedState = { ...fresh.state, ...stateOf(continued) };
-    if (!critique.grounded) {
+    if (!critique.grounded && gateApplies) {
       await context.event("error", "Insufficient evidence", INSUFFICIENT_EVIDENCE);
       return {
         ...continued,
-        status: "paused",
+        // Terminal (D1): the pre-D1 park at paused with question=null
+        // was a silent dead end — excluded from auto-resume, with no
+        // reason on the record. Blocked is final; the reason names
+        // the remedy (a new task) and the refusal stays the result.
+        status: "blocked",
         result: INSUFFICIENT_EVIDENCE,
-        error: INSUFFICIENT_EVIDENCE,
+        error: CRITIC_BLOCKED_REASON,
         question: null,
         plan: fresh.plan,
         stageTrace: trace,
@@ -2026,7 +2119,7 @@ export class AgentService {
           criticBlocked: true,
           notice: {
             title: "Task blocked — insufficient evidence",
-            body: INSUFFICIENT_EVIDENCE,
+            body: CRITIC_BLOCKED_REASON,
             key: `critic-blocked:${task.id}:${task.attempts}`,
           },
         },
@@ -2213,6 +2306,16 @@ export class AgentService {
         task.error ?? task.title,
         task.id,
         `task-error:${task.id}:${task.attempts}`,
+      );
+    } else if (task.status === "blocked") {
+      // Terminal Critic block (D1): the user hears why it stopped —
+      // the reason on the record — once, like any terminal outcome.
+      await this.notify(
+        owner,
+        "Task blocked",
+        task.error ?? task.title,
+        task.id,
+        `task-blocked:${task.id}:${task.attempts}`,
       );
     } else if (task.status === "waiting_input") {
       await this.notify(

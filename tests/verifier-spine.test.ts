@@ -7,6 +7,7 @@ import { createApp } from "../apps/server/src/app.ts";
 import { createStore } from "../apps/server/src/db.ts";
 import {
   acceptancePlanSchema,
+  CRITIC_BLOCKED_REASON,
   checkVerdictSchema,
   countsAsEvidence,
   createPlan,
@@ -23,9 +24,10 @@ import { modelFixture } from "./helpers/model.ts";
 
 // Verifier spine (Design Note A, Agent-Me port): the Critic gate
 // grounds a completion on >=1 surviving evidence match or >=1
-// successful tool result; ungrounded completions park blocked with
-// the fixed insufficient-evidence refusal instead of shipping the
-// model's claim; write-task completions pass the Verifier's
+// successful tool result; ungrounded completions in the gate's
+// scope (D1) end terminally blocked with the fixed
+// insufficient-evidence refusal instead of shipping the model's
+// claim; write-task completions pass the Verifier's
 // invariants (non-empty, no fabricated citations, save_memory
 // read-back) or are replaced with the verification-failed status.
 // Every run leaves a StageTrace on the task record.
@@ -254,7 +256,7 @@ test("a completion grounded by a surviving recall match succeeds with no tool re
   }
 });
 
-test("an ungrounded completion parks blocked with the refusal, never the model's claim", async (t) => {
+test("an ungrounded completion ends terminally blocked with the refusal and a reason, never the model's claim", async (t) => {
   const run = await startTask(
     t,
     (index) =>
@@ -266,22 +268,31 @@ test("an ungrounded completion parks blocked with the refusal, never the model's
   try {
     await run.server.agent.worker.tick();
     const detail = await run.server.agent.detail("owner", run.task.id);
-    assert.equal(detail.task.status, "paused", "the task parks blocked, not succeeded");
+    // D1: the block is a terminal status with a human-readable
+    // reason — not the pre-D1 silent park at paused/question=null.
+    assert.equal(detail.task.status, "blocked", "the task ends blocked, not succeeded");
     assert.equal(detail.task.result, INSUFFICIENT_EVIDENCE);
-    assert.equal(detail.task.error, INSUFFICIENT_EVIDENCE);
+    assert.equal(detail.task.error, CRITIC_BLOCKED_REASON);
+    assert.equal(detail.task.question, null);
     assert.equal(detail.task.state.criticBlocked, true);
     const critic = detail.task.stageTrace?.find((entry) => entry.agent === "critic");
     assert.equal(critic?.outcome, "blocked");
     assert.equal(critic?.metrics.approved, false);
+    assert.equal(critic?.metrics.evidence_gate, true);
     assert.ok(
       detail.events.some(
         (event) => event.kind === "error" && event.title === "Insufficient evidence",
       ),
       "an event records the block",
     );
-    // A blocked task is resumable by the user, like any paused task.
-    const resumed = await run.server.agent.control("owner", run.task.id, "resume");
-    assert.equal(resumed.status, "queued");
+    // Terminal means terminal: resume refuses, like any finished
+    // task — the remedy named in the reason is a new task.
+    await assert.rejects(
+      run.server.agent.control("owner", run.task.id, "resume"),
+      /Only paused tasks can be resumed/,
+    );
+    const after = await run.server.agent.getTask("owner", run.task.id);
+    assert.equal(after.status, "blocked");
   } finally {
     await run.done();
   }
