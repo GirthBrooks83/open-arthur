@@ -171,7 +171,9 @@ test("a FAILED consult (Slack unconfigured) does not ground a completion", async
   try {
     await run.server.agent.worker.tick();
     const detail = await run.server.agent.detail("owner", run.task.id);
-    assert.equal(detail.task.status, "paused");
+    // The run attempted a work tool and reported its outcome, so the
+    // evidence gate applies (D1 scope) — and the block is terminal.
+    assert.equal(detail.task.status, "blocked");
     assert.equal(detail.task.result, INSUFFICIENT_EVIDENCE);
     assert.equal(detail.task.state.criticBlocked, true);
   } finally {
@@ -195,7 +197,7 @@ test("a completion with no tool evidence at all stays blocked (planning is not e
   try {
     await run.server.agent.worker.tick();
     const detail = await run.server.agent.detail("owner", run.task.id);
-    assert.equal(detail.task.status, "paused");
+    assert.equal(detail.task.status, "blocked");
     assert.equal(detail.task.result, INSUFFICIENT_EVIDENCE);
     assert.equal(detail.task.state.criticBlocked, true);
   } finally {

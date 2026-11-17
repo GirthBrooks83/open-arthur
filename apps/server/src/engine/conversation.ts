@@ -13,6 +13,7 @@ import {
 import { modelCallOptions, modelProviderKeyPresent } from "../agent-config.ts";
 import { computerInstructions, computerTools } from "../computer-tools.ts";
 import type { Config } from "../config.ts";
+import { humanProviderError, sanitizeMessagesForProvider } from "./provider-boundary.ts";
 import { buildProviderChain } from "./rate-limit.ts";
 import type { AgentService } from "./service.ts";
 
@@ -239,8 +240,33 @@ export class ConversationAgent extends AbstractAgent {
     });
     return new Observable((subscriber) => {
       const subscription = agent
-        .run({ ...input, tools: input.tools.filter((t) => t.name === "open_workspace") })
-        .subscribe(subscriber);
+        .run({
+          ...input,
+          // The stored history keeps toolCalls and tool-role messages
+          // from earlier rounds; resent verbatim, the provider
+          // rejects the whole request (D2). Send the sanitized copy —
+          // the stored conversation is never rewritten.
+          messages: sanitizeMessagesForProvider(input.messages),
+          tools: input.tools.filter((t) => t.name === "open_workspace"),
+        })
+        .subscribe({
+          next: (event) => {
+            // A provider rejection arrives as a RUN_ERROR event (or
+            // as a stream error, below) carrying the provider's own
+            // wording. Neither may reach the client raw.
+            if (event.type === EventType.RUN_ERROR && "message" in event)
+              subscriber.next({ ...event, message: humanProviderError(event.message) });
+            else subscriber.next(event);
+          },
+          error: (error) => {
+            subscriber.next({
+              type: EventType.RUN_ERROR,
+              message: humanProviderError(error),
+            });
+            subscriber.complete();
+          },
+          complete: () => subscriber.complete(),
+        });
       return () => {
         browserAbort.abort();
         agent.abortRun();

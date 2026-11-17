@@ -340,14 +340,19 @@ function WorkspaceShell({
               marginHorizontal: 20,
             }}
           >
-            <View style={{ position: "absolute", left: 0, top: 16 }}>
+            <View style={{ position: "absolute", left: 0, top: 16, zIndex: 2 }}>
               <IconButton
                 icon={Menu}
                 label="Open conversations and menu"
                 onPress={() => setThreadsOpen(true)}
               />
             </View>
-            <View style={{ alignItems: "center", gap: 1 }}>
+            {/* box-none: this full-width wrapper must never swallow taps
+                meant for the corner buttons it overlaps on web — in DOM
+                order it paints above the left (menu) button, so without
+                this every menu tap landed on the wrapper and died. Its
+                own children (mascot, ComputerEntry) stay tappable. */}
+            <View pointerEvents="box-none" style={{ alignItems: "center", gap: 1 }}>
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`Open ${agentName} activity and approvals`}
@@ -378,7 +383,7 @@ function WorkspaceShell({
               </Pressable>
               {section === "chat" && <ComputerEntry />}
             </View>
-            <View style={{ position: "absolute", right: 0, top: 16 }}>
+            <View style={{ position: "absolute", right: 0, top: 16, zIndex: 2 }}>
               <IconButton
                 icon={Bell}
                 label={`Notifications, ${pending} unread or pending`}
