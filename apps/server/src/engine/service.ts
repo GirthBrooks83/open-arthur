@@ -21,6 +21,7 @@ import type {
   Artifact,
   BrowserSession,
   Mail,
+  NewsBriefing,
   ProposalInput,
 } from "../../../../packages/domain/src/index.ts";
 import type { ActionService } from "../actions.ts";
@@ -69,6 +70,11 @@ import { type GraphitiLane, graphitiLaneFor } from "./graphiti.ts";
 import { type HindsightLane, hindsightLaneFor } from "./hindsight.ts";
 import { type Mem0Lane, mem0LaneFor } from "./mem0.ts";
 import { executeModelTask, UNCONFIRMED_RUN_QUESTION } from "./model.ts";
+import {
+  addNewsBriefing as fileNewsBriefing,
+  listNewsBriefings,
+  type NewsBriefingInput,
+} from "./news.ts";
 import {
   approvePendingSkillWrite,
   listPendingSkillWrites,
@@ -797,6 +803,18 @@ export class AgentService {
   async dailyBriefs(owner: string, limit = 20): Promise<DailyBrief[]> {
     const briefs = await this.db.list<DailyBrief>(owner, DAILY_BRIEF_KIND);
     return briefs.slice(0, Math.max(1, Math.min(100, limit)));
+  }
+  // --- News (engine/news.ts) ---
+  // Filed news editions: the add path is the filing lane's write
+  // surface, the list path is the News page's read surface. No
+  // computation and no audit fanfare — an edition is content the
+  // owner asked to have filed, like a memory write.
+  async addNewsBriefing(owner: string, input: NewsBriefingInput): Promise<NewsBriefing> {
+    return fileNewsBriefing(this.db, owner, input);
+  }
+  // Recent filed editions for this owner, newest first.
+  async newsBriefings(owner: string, limit = 20): Promise<NewsBriefing[]> {
+    return listNewsBriefings(this.db, owner, limit);
   }
   // Ensure the morning scheduled brief job exists: a worker task
   // (kind "agent", input.dailyBrief) created idempotently under

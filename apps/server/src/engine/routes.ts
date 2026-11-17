@@ -7,6 +7,7 @@ import type {
   AgentNotification,
 } from "../../../../packages/domain/src/agent.ts";
 import { AppError } from "../errors.ts";
+import { newsBriefingInputSchema } from "./news.ts";
 import type { AgentService } from "./service.ts";
 import { skillManageOpSchema } from "./skills.ts";
 
@@ -245,6 +246,20 @@ export function agentRoutes(service: AgentService): Hono<{ Variables: { owner: s
       .object({ limit: z.coerce.number().int().min(1).max(100).default(20) })
       .parse({ limit: c.req.query("limit") });
     return c.json(await service.dailyBriefs(c.get("owner"), limit));
+  });
+  // News (engine/news.ts): editions filed off to the side by the
+  // news lane land through the add route; the News page reads the
+  // list route, newest first. Filing is a plain authenticated
+  // write — no fetching or scheduling lives behind these routes.
+  app.post("/news", async (c) => {
+    const body = newsBriefingInputSchema.parse(await c.req.json());
+    return c.json(await service.addNewsBriefing(c.get("owner"), body), 201);
+  });
+  app.get("/news", async (c) => {
+    const { limit } = z
+      .object({ limit: z.coerce.number().int().min(1).max(100).default(20) })
+      .parse({ limit: c.req.query("limit") });
+    return c.json(await service.newsBriefings(c.get("owner"), limit));
   });
   // Content-free audit log (engine/audit.ts): recent lifecycle
   // events for this owner, newest first. Events carry counts only
