@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { MessageSchema } from "@ag-ui/core";
@@ -213,7 +213,17 @@ export async function createApp(
         hindsightWired: Boolean(config.integrations?.hindsightUrl),
         n8n: Boolean(config.integrations?.n8nUrl),
         anythingllm: Boolean(config.integrations?.anythingLlmUrl),
+        // GitHub eyes (engine/github-eyes.ts): `github` is the
+        // configured level (token present) and `githubWired` is a
+        // code fact (the read-only MCP adapter ships in this
+        // codebase). The honest runtime level — configured vs wired
+        // (handshake done) vs verified (a real read succeeded) —
+        // is the `githubEyes` block below, from the client's cached
+        // status; it never claims a level it has not reached.
+        github: Boolean(config.githubMcpToken),
+        githubWired: true,
       },
+      githubEyes: agent.githubEyes.status(),
       integrationsLive: live.integrationsLive,
       browserLive: live.browserLive,
     });
@@ -236,14 +246,15 @@ export async function createApp(
   });
   // Tap-to-sign-in links: minting is authenticated with the access
   // key and returns a URL carrying a sign-in code (hashed at rest —
-  // see Auth.mintSigninCode). By default the code is one-time with a
-  // 10-minute life and the exchange trades it for a session exactly
-  // once; with durable: true the code never expires and is never
-  // consumed, so the same link signs its holder in every time (its
-  // expiresAt reads back as null). Both endpoints are rate-limited
-  // like the typed sign-in and mount before the /api/* auth
-  // middleware, like /api/session itself: the code IS the credential
-  // for the exchange.
+  // see Auth.mintSigninCode). EVERY code is single-use: the exchange
+  // trades it for a session exactly once and sets the long-lived
+  // cookie that keeps later visits signed in. A code lives 10
+  // minutes, or 30 days with durable: true — durable buys
+  // tap-it-later time, never replay. Both endpoints are rate-limited
+  // and mount before the /api/* auth middleware, like /api/session
+  // itself: the code IS the credential for the exchange. Every
+  // exchange attempt is logged (outcome, source, code fingerprint —
+  // never the code itself).
   let mintWindow = 0,
     mintAttempts = 0;
   app.post("/api/session/signin-link", async (c) => {
@@ -259,20 +270,45 @@ export async function createApp(
     const { code, expiresAt } = await auth.mintSigninCode(body.accessKey, body.durable);
     return c.json({
       url: `${config.publicUrl}/?signin=${encodeURIComponent(code)}`,
-      expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(),
+      expiresAt: new Date(expiresAt).toISOString(),
     });
   });
-  let exchangeWindow = 0,
-    exchangeAttempts = 0;
+  // Exchange limiter is PER SOURCE (the mint + typed sign-in
+  // limiters above stay global, as before): the source is the first
+  // X-Forwarded-For hop, which the host's proxy sets; clients with
+  // no forwarded header share the "unknown" bucket. Buckets are
+  // pruned lazily once the map grows.
+  const exchangeLimits = new Map<string, { window: number; attempts: number }>();
   app.post("/api/session/signin-exchange", async (c) => {
-    if (Date.now() - exchangeWindow > 60000) {
-      exchangeWindow = Date.now();
-      exchangeAttempts = 0;
+    const source = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+    const logAttempt = (outcome: string, code?: string) =>
+      console.log(
+        `[OpenMuse] signin-exchange ${outcome} source=${source} code=${
+          code ? createHash("sha256").update(code).digest("hex") : "none"
+        } at=${new Date().toISOString()}`,
+      );
+    const now = Date.now();
+    let bucket = exchangeLimits.get(source);
+    if (!bucket || now - bucket.window > 60000) {
+      bucket = { window: now, attempts: 0 };
+      exchangeLimits.set(source, bucket);
+      if (exchangeLimits.size > 1000)
+        for (const [key, value] of exchangeLimits)
+          if (now - value.window > 60000) exchangeLimits.delete(key);
     }
-    if (++exchangeAttempts > 30)
-      throw new AppError("Too many sign-in attempts. Try again in a minute.", 429);
     const body = z.object({ code: z.string().optional() }).parse(await c.req.json());
-    const session = await auth.exchangeSigninCode(body.code);
+    if (++bucket.attempts > 30) {
+      logAttempt("rate_limited", body.code);
+      throw new AppError("Too many sign-in attempts. Try again in a minute.", 429);
+    }
+    let session: Awaited<ReturnType<typeof auth.exchangeSigninCode>>;
+    try {
+      session = await auth.exchangeSigninCode(body.code);
+    } catch (error) {
+      logAttempt("rejected", body.code);
+      throw error;
+    }
+    logAttempt("ok", body.code);
     await workspace.ensureSample("local-user", actions);
     await agent.ensure("local-user");
     if (config.mode === "sample") await agent.refreshIdeas("local-user");
@@ -318,6 +354,18 @@ export async function createApp(
     const authorization = c.req.header("authorization");
     if (authorization?.startsWith("Bearer ")) await auth.revokeSession(authorization.slice(7));
     return c.json({ ok: true });
+  });
+  // Revoke an outstanding sign-in code. Mounted after the /api/*
+  // auth middleware, so it takes a live session (in this
+  // single-owner app, the session IS the admin). Accepts the code
+  // itself or its SHA-256 fingerprint; unknown codes return
+  // revoked: false rather than an error, so it is no oracle.
+  app.post("/api/session/signin-codes/revoke", async (c) => {
+    const body = z
+      .object({ code: z.string().optional(), fingerprint: z.string().optional() })
+      .parse(await c.req.json());
+    const revoked = await auth.revokeSigninCode(body.fingerprint ?? body.code);
+    return c.json({ ok: true, revoked });
   });
   app.get("/api/workspace", async (c) => {
     const snapshot = await workspace.snapshot(c.get("owner"), c.req.query("q"));

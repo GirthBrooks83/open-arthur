@@ -14,16 +14,26 @@ export const LINK_COOKIE = "openmuse_session";
 // token, never the access key itself, so it can be revoked by
 // deleting the session record without rotating the key.
 export const LINK_SESSION_TTL_MS = 90 * DAY_MS;
-// Sign-in codes (see mintSigninCode): a one-time code trades for a
-// session exactly once and dies quickly, so a sign-in link is safe to
-// send through chat/messages where a long-lived link would not be. A
-// durable code (minted with durable: true) is the opposite trade: it
-// never expires and is never consumed, so ONE link keeps signing its
-// holder in until the code's record is deleted server-side — Joseph's
-// permanent bookmark link. Durable records carry expiresAt: null.
+// Sign-in codes (see mintSigninCode): EVERY code — one-time or
+// durable — is single-use and expires; the long-lived session cookie
+// the exchange sets is what keeps a bookmark visit signed in, never
+// the code itself. (Pre-fix, a durable code never expired and was
+// never consumed: a replayable bearer credential. Claude's security
+// review of PR #46 failed that design, and the epoch below kills
+// every code minted under it.) A one-time code dies in minutes; a
+// durable code (minted with durable: true) gets a generous 30 days —
+// long enough to tap the bookmark once, after which the cookie
+// carries the session for months.
 export const SIGNIN_CODE_TTL_MS = 10 * 60 * 1000;
+export const DURABLE_SIGNIN_CODE_TTL_MS = 30 * DAY_MS;
+// Sign-in code format epoch. Records minted before the PR #46 fix
+// carry no epoch (and durable ones never expire and replay forever),
+// so they are treated as exposed: exchange accepts only records
+// stamped with the current epoch, which invalidates every pre-fix
+// code the moment this code deploys — no manual cleanup step.
+export const SIGNIN_CODE_EPOCH = 2;
 const SIGNIN_CODE_KIND = "signin-codes";
-type SigninCodeRecord = { owner: string; expiresAt: number | null; durable?: boolean };
+type SigninCodeRecord = { owner: string; expiresAt: number; durable?: boolean; epoch?: number };
 export class Auth {
   constructor(
     private readonly db: Store,
@@ -44,43 +54,57 @@ export class Auth {
   }
   // Mint a sign-in code for a tap-to-sign-in link (/?signin=<code>).
   // Authenticated with the access key, exactly like the typed
-  // sign-in. Only the code's SHA-256 digest is stored, so a database
-  // read never yields a usable code. With durable: true the code
-  // never expires and is not consumed on exchange (see
-  // exchangeSigninCode); revoke it by deleting its record (owner
-  // "system", kind "signin-codes", id = SHA-256 hex digest of the
-  // code) — the link dies immediately, no key rotation needed.
+  // sign-in. Only the code's SHA-256 digest is stored (as the record
+  // id), so a database read never yields a usable code. Every code
+  // is stamped with the current epoch and an expiry — 10 minutes, or
+  // 30 days with durable: true — and every code is single-use (see
+  // exchangeSigninCode). Revoke an outstanding code with
+  // revokeSigninCode — the link dies immediately, no key rotation
+  // needed.
   async mintSigninCode(accessKey?: string, durable = false) {
     if (!this.keyAccepted(accessKey)) throw new AppError("Access key is incorrect", 401);
     const code = randomBytes(32).toString("base64url");
-    const expiresAt = durable ? null : Date.now() + SIGNIN_CODE_TTL_MS;
+    const expiresAt = Date.now() + (durable ? DURABLE_SIGNIN_CODE_TTL_MS : SIGNIN_CODE_TTL_MS);
     await this.db.put("system", SIGNIN_CODE_KIND, {
       id: digest(code).toString("hex"),
       owner: "local-user",
       expiresAt,
+      epoch: SIGNIN_CODE_EPOCH,
       ...(durable ? { durable: true } : {}),
     });
     return { code, expiresAt };
   }
-  // Trade a sign-in code for a session. A one-time record is taken
-  // (deleted) atomically as it is read, so the same code can never be
-  // exchanged twice — not even by two requests racing. A durable
-  // record is only read, never taken: it trades for a fresh session
-  // every time until the record is deleted. Expired codes fail the
-  // same way as unknown ones: no hint about which.
+  // Trade a sign-in code for a session. The record is taken
+  // (deleted) atomically as it is read, so EVERY code — durable
+  // included — can be exchanged exactly once, never twice, not even
+  // by two requests racing. The exchange sets the long-lived session
+  // cookie, which is what keeps later bookmark visits signed in.
+  // Records from before the PR #46 fix (no current epoch — including
+  // the old never-expiring durable records) are refused, as are
+  // expired codes; every failure reads the same: no hint about which.
   async exchangeSigninCode(code?: string) {
     if (!code) throw new AppError("Sign-in link is invalid or has expired", 401);
     const id = digest(code).toString("hex");
-    const peek = await this.db.get<SigninCodeRecord>("system", SIGNIN_CODE_KIND, id);
-    if (peek?.durable) {
-      if (peek.expiresAt !== null && peek.expiresAt < Date.now())
-        throw new AppError("Sign-in link is invalid or has expired", 401);
-      return this.issue(LINK_SESSION_TTL_MS);
-    }
     const record = await this.db.take<SigninCodeRecord>("system", SIGNIN_CODE_KIND, id);
-    if (!record || record.expiresAt === null || record.expiresAt < Date.now())
+    if (!record || record.epoch !== SIGNIN_CODE_EPOCH || record.expiresAt < Date.now())
       throw new AppError("Sign-in link is invalid or has expired", 401);
     return this.issue(LINK_SESSION_TTL_MS);
+  }
+  // Revoke an outstanding sign-in code (the admin path behind
+  // POST /api/session/signin-codes/revoke). Accepts the code itself
+  // or its SHA-256 fingerprint — the record id — since the
+  // fingerprint is all an operator ever sees. Returns whether a
+  // record was actually removed; unknown codes are a quiet false,
+  // so the endpoint is no oracle for which codes exist.
+  async revokeSigninCode(codeOrFingerprint?: string) {
+    if (!codeOrFingerprint) return false;
+    const id = /^[0-9a-f]{64}$/.test(codeOrFingerprint)
+      ? codeOrFingerprint
+      : digest(codeOrFingerprint).toString("hex");
+    const existing = await this.db.get("system", SIGNIN_CODE_KIND, id);
+    if (!existing) return false;
+    await this.db.remove("system", SIGNIN_CODE_KIND, id);
+    return true;
   }
   // Revoke one session token (explicit sign-out). Unknown or already
   // expired tokens are a no-op: sign-out never fails.

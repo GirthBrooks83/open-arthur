@@ -10,6 +10,7 @@ import {
   Lightbulb,
   ListChecks,
   Mail,
+  Newspaper,
   Pause,
   Play,
   Plus,
@@ -1732,6 +1733,12 @@ export function AppsScreen() {
       title: "Approvals",
       detail: "Approve merges and deploys, exact version by exact version",
       icon: ShieldCheck,
+    },
+    {
+      section: "news" as const,
+      title: "News",
+      detail: "News briefings, newest first",
+      icon: Newspaper,
     },
   ];
   return (

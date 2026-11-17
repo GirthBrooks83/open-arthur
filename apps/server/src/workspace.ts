@@ -8,8 +8,9 @@ import type {
   Mail,
   ProposalInput,
   Workspace,
+  WorkspaceNotice,
 } from "../../../packages/domain/src/index.ts";
-import { GoogleClient } from "../../../packages/integrations/src/google.ts";
+import { GoogleApiError, GoogleClient } from "../../../packages/integrations/src/google.ts";
 import { createSamplePdf } from "../../../packages/integrations/src/pdf.ts";
 import type { ActionService } from "./actions.ts";
 import { agentConfigured } from "./agent-config.ts";
@@ -18,6 +19,21 @@ import type { Store } from "./db.ts";
 import { AppError } from "./errors.ts";
 import type { Files } from "./files.ts";
 import type { GoogleAuth } from "./google-auth.ts";
+import { providerFailure } from "./log.ts";
+
+// The standalone calendar routes surface service errors to the owner,
+// and the API layer passes GoogleApiError messages through verbatim —
+// but Google builds those messages from the provider's raw error
+// wording (quota metric, service name, project number), so a rejected
+// calendar call used to land on the Calendar screen raw. Mirror the
+// /api/workspace degrade: provider failures become one human message
+// here; every other error keeps its existing handling.
+const CALENDAR_UNAVAILABLE =
+  "Calendar is temporarily unavailable — it couldn't be loaded this time. " +
+  "Your events should come back on their own, so try again in a little while.";
+function degradeCalendarError(error: unknown): unknown {
+  return error instanceof GoogleApiError ? new AppError(CALENDAR_UNAVAILABLE, 502) : error;
+}
 
 export class WorkspaceService {
   private seeding = new Map<string, Promise<void>>();
@@ -63,7 +79,11 @@ export class WorkspaceService {
           accessRole: "owner",
         },
       ];
-    return this.google(owner, connection.id).listCalendars();
+    try {
+      return await this.google(owner, connection.id).listCalendars();
+    } catch (error) {
+      throw degradeCalendarError(error);
+    }
   }
   async events(
     owner: string,
@@ -71,7 +91,13 @@ export class WorkspaceService {
   ) {
     const connection = await this.connection(owner);
     if (!connection) return [];
-    if (this.config.mode === "live") return this.google(owner, connection.id).listEvents(options);
+    if (this.config.mode === "live") {
+      try {
+        return await this.google(owner, connection.id).listEvents(options);
+      } catch (error) {
+        throw degradeCalendarError(error);
+      }
+    }
     return (await this.db.list<CalendarEvent>(owner, "events"))
       .filter(
         (event) =>
@@ -260,14 +286,44 @@ export class WorkspaceService {
   }
   async snapshot(owner: string, query?: string): Promise<Workspace> {
     let mail: Mail[], events: CalendarEvent[];
+    const notices: WorkspaceNotice[] = [];
     const connected = await this.connected(owner);
     if (this.config.mode === "live" && connected) {
       const connection = await this.connection(owner);
       if (!connection) throw new AppError("Google is disconnected", 409);
       const google = this.google(owner, connection.id);
-      [mail, events] = await Promise.all([google.listMail(query), google.listEvents()]);
-      mail = await this.cacheMail(owner, mail, connection.id);
-      for (const event of events) await this.db.put(owner, "events", event);
+      // Each Google source degrades on its own. A single rejected call
+      // (e.g. Gmail's per-minute quota) used to reject the whole
+      // snapshot, and the API layer passes Google error messages
+      // through verbatim — so the owner saw a raw provider string as a
+      // fatal workspace failure. Now the failed source loads empty and
+      // carries a human notice; the provider's raw wording, quota
+      // internals and project numbers never enter the snapshot. The
+      // failure itself is still recorded server-side (providerFailure)
+      // so a persistent outage stays diagnosable from the logs.
+      try {
+        mail = await this.cacheMail(owner, await google.listMail(query), connection.id);
+      } catch (error) {
+        providerFailure("workspace mail load", error);
+        mail = [];
+        notices.push({
+          source: "mail",
+          message:
+            "Gmail is temporarily unavailable — it couldn't be loaded this time. Everything else in your workspace loaded normally; mail should come back on its own, so try refreshing in a little while.",
+        });
+      }
+      try {
+        events = await google.listEvents();
+        for (const event of events) await this.db.put(owner, "events", event);
+      } catch (error) {
+        providerFailure("workspace events load", error);
+        events = [];
+        notices.push({
+          source: "events",
+          message:
+            "Calendar is temporarily unavailable — it couldn't be loaded this time. Everything else in your workspace loaded normally; your events should come back on their own, so try refreshing in a little while.",
+        });
+      }
     } else if (this.config.mode === "sample" && connected) {
       mail = await this.db.list<Mail>(owner, "mail");
       events = await this.db.list<CalendarEvent>(owner, "events");
@@ -288,6 +344,7 @@ export class WorkspaceService {
       },
       mail: mail.sort((a, b) => b.date.localeCompare(a.date)),
       events: events.sort((a, b) => a.start.localeCompare(b.start)),
+      notices,
       files: await this.files.list(owner),
       browsers: await this.db.list<BrowserSession>(owner, "browsers"),
       actions: await this.db.list<ActionProposal>(owner, "actions"),

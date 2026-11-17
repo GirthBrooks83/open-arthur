@@ -7,6 +7,10 @@ export type TaskStatus =
   | "waiting_input"
   | "scheduled"
   | "paused"
+  // Terminal Critic block (D1, engine/verifier.ts): the evidence
+  // gate ended the task with a human-readable reason on the record.
+  // Final — never resumed or auto-retried; the remedy is a new task.
+  | "blocked"
   | "succeeded"
   | "failed"
   | "cancelled"
