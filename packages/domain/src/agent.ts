@@ -193,3 +193,60 @@ export const goalInputSchema = z.object({
   category: z.string().max(80).default("Personal"),
   milestones: z.array(z.string().min(1).max(200)).max(20).default([]),
 });
+
+// --- Approval Center (client mirror of the server engine's shapes) ---
+// Version-exact owner approvals for restricted actions. An approval
+// binds to one version number AND its content hash; a discussion
+// message is never an approval. The server engine
+// (apps/server/src/engine/approval-center.ts) owns these semantics;
+// these types only describe the wire shape for the client.
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "changes_requested" | "stopped";
+export type ApprovalControl =
+  | "approve_exact_version"
+  | "reject"
+  | "request_changes"
+  | "keep_pending"
+  | "stop_operation";
+export interface ProposalVersion {
+  version: number;
+  action: string;
+  details: string;
+  evidence?: string;
+  contentHash: string;
+  createdAt: string;
+  createdBy: string;
+}
+export interface DiscussionMessage {
+  at: string;
+  from: string;
+  text: string;
+  version: number;
+}
+export interface ApprovalAuditEntry {
+  at: string;
+  kind: string;
+  actor: string;
+  version: number;
+  note?: string;
+}
+export interface ApprovalRequest {
+  id: string;
+  title: string;
+  status: ApprovalStatus;
+  versions: ProposalVersion[];
+  discussion: DiscussionMessage[];
+  audit: ApprovalAuditEntry[];
+  approvedVersion: number | null;
+  approvedHash: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ApprovalExecution {
+  requestId: string;
+  version: number;
+  contentHash: string;
+  action: string;
+  details: string;
+  at: string;
+  result: string;
+}
