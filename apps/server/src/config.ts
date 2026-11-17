@@ -69,6 +69,15 @@ export interface Config {
   // Both values come from the Slack app Joseph creates from the manifest
   // in docs terms; unset means the bridge answers setup challenges but
   // never acts or posts. See apps/server/src/slack.ts.
+  // GitHub eyes (engine/github-eyes.ts): a fine-grained, READ-ONLY
+  // personal access token for the official hosted GitHub MCP server.
+  // The token is the only credential; unset means the eyes are off
+  // and no GitHub tool is offered to the agent. Read-only is enforced
+  // in the client code (allowlist), not by this token alone.
+  githubMcpToken?: string;
+  // Override for the hosted MCP endpoint (tests / future GitHub
+  // Enterprise MCP hosting). Unset = the public hosted endpoint.
+  githubMcpUrl?: string;
   slackBotToken?: string;
   slackSigningSecret?: string;
   // Channel the Daily Brief posts to (the #team-arthur channel id),
@@ -204,6 +213,8 @@ export function readConfig(): Config {
       baseUrl: "https://api.groq.com/openai/v1",
       billing: "free_then_paid — auto cut-off if the free route stops being free; never charges",
     },
+    githubMcpToken: process.env.GITHUB_MCP_TOKEN,
+    githubMcpUrl: process.env.GITHUB_MCP_URL,
     slackBotToken: process.env.SLACK_BOT_TOKEN,
     slackSigningSecret: process.env.SLACK_SIGNING_SECRET,
     slackBriefChannel: process.env.SLACK_BRIEF_CHANNEL,

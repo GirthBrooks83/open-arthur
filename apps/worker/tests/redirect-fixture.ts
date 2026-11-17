@@ -78,10 +78,20 @@ function probeFixture(): Promise<{ status: number; location: string | null }> {
 
 export async function startRedirectFixture(): Promise<{
   url: string;
+  hits: () => number;
   close: () => Promise<void>;
 }> {
+  // Hit counter: every /redirect request counts, including the startup
+  // self-probe below. The tests snapshot the counter before a leg and assert
+  // it afterwards incremented by exactly the number of requests that leg is
+  // expected to make (one per navigation). A leg whose navigation never
+  // reaches the fixture — refused before any request, or failed against a
+  // different address — leaves the counter short and fails, instead of
+  // passing on an error code that proves nothing about the redirect guard.
+  let hits = 0;
   const server = createServer((incoming, response) => {
     if (incoming.url === "/redirect") {
+      hits += 1;
       response.writeHead(302, { location: REDIRECT_TARGET });
       response.end();
     } else {
@@ -117,6 +127,7 @@ export async function startRedirectFixture(): Promise<{
   }
   return {
     url: `http://${FIXTURE_IP}/redirect`,
+    hits: () => hits,
     close: async () => {
       server.closeIdleConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

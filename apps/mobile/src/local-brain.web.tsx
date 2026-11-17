@@ -217,100 +217,11 @@ export function LocalBrainChat() {
         src="/local-brain/index.html"
         style={{ width: 1, height: 1, border: 0, opacity: 0, position: "absolute" }}
       />
-      <Card style={{ padding: 16, gap: 10 }}>
-        <Text style={s.heading}>Pick a model for this phone</Text>
-        <Text style={s.muted}>
-          The model downloads once, then runs entirely on this device — no API key, no server, works
-          offline. It is a small model: chat only, no tools, no access to your apps or files, and
-          simpler answers than the cloud brain.
-        </Text>
-        {LOCAL_MODELS.map((model) => {
-          const isLoaded =
-            state.stage !== "idle" && state.modelId === model.id && state.stage !== "error";
-          const isDownloadingThis = downloading && state.modelId === model.id;
-          const isCached = cachedModelIds?.includes(model.id) ?? false;
-          const canDelete = canDeleteModelCache(model.id, state, cachedModelIds ?? []);
-          const isDeletingThis = deletingModelId === model.id;
-          return (
-            <View key={model.id} style={{ gap: 6, paddingTop: 6 }}>
-              <View style={[s.row, { gap: 8, flexWrap: "wrap" }]}>
-                <Text style={[s.text, { fontWeight: "600" }]}>{model.label}</Text>
-                <Chip>{`About ${formatBytes(model.downloadBytes)} download`}</Chip>
-                {isLoaded && !isDownloadingThis && <Chip tint={colors.sky}>Loaded</Chip>}
-                {isCached && !isLoaded && <Chip>Downloaded ✓</Chip>}
-              </View>
-              <Text style={s.muted}>{model.blurb}</Text>
-              {!isCached && <Text style={s.small}>{downloadWarning(model)}</Text>}
-              {isDownloadingThis ? (
-                <View style={{ gap: 6 }}>
-                  <View
-                    style={{
-                      height: 8,
-                      borderRadius: 4,
-                      backgroundColor: "#EEEEF0",
-                      overflow: "hidden",
-                    }}
-                  >
-                    <View
-                      style={{
-                        height: 8,
-                        width: `${Math.round(state.progress * 100)}%`,
-                        backgroundColor: colors.blue,
-                      }}
-                    />
-                  </View>
-                  <Text style={s.small}>
-                    {`Downloading… ${Math.round(state.progress * 100)}%`}
-                    {state.note ? ` — ${state.note}` : ""}
-                  </Text>
-                </View>
-              ) : (
-                <View style={[s.row, { gap: 8, flexWrap: "wrap" }]}>
-                  <Button
-                    small
-                    disabled={downloading || (isLoaded && state.modelId === model.id)}
-                    onPress={() => startModel(model.id)}
-                    style={{ alignSelf: "flex-start" }}
-                  >
-                    {isLoaded
-                      ? "Using this model"
-                      : isCached
-                        ? "Use this model"
-                        : "Download & use this model"}
-                  </Button>
-                  {canDelete && (
-                    <Button
-                      small
-                      disabled={deletingModelId !== null || downloading}
-                      onPress={() => removeDownload(model.id)}
-                      style={{ alignSelf: "flex-start" }}
-                    >
-                      {isDeletingThis
-                        ? "Removing…"
-                        : `Remove download (free ${formatBytes(model.downloadBytes)})`}
-                    </Button>
-                  )}
-                </View>
-              )}
-              {isCached && isLoaded && !isDownloadingThis && (
-                <Text style={s.small}>
-                  To free its space, switch to another model first — then its Remove button appears
-                  here.
-                </Text>
-              )}
-            </View>
-          );
-        })}
-        {state.stage === "error" && (
-          <>
-            <ErrorNotice error={state.note} />
-            <Button small onPress={() => startModel(modelId)} style={{ alignSelf: "flex-start" }}>
-              Try loading again
-            </Button>
-          </>
-        )}
-      </Card>
-
+      {/* One scroll region for the whole page: the model picker is taller
+          than a phone screen, so it must live INSIDE the scroll view. When
+          it sat outside (only the chat list scrolled), the models below
+          the fold were clipped with no way to reach them. The message
+          input stays fixed below the scroll region. */}
       <ScrollView
         ref={list}
         style={{ flex: 1 }}
@@ -322,10 +233,108 @@ export function LocalBrainChat() {
         }}
         scrollEventThrottle={100}
         onContentSizeChange={() => {
-          if (followLatest.current) list.current?.scrollToEnd({ animated: false });
+          // Follow the newest message only once a chat exists — with no
+          // messages yet, scrolling to the end on mount would jump past
+          // the model picker the user opened this page to use.
+          if (followLatest.current && messages.length > 0)
+            list.current?.scrollToEnd({ animated: false });
         }}
         keyboardShouldPersistTaps="handled"
       >
+        <Card style={{ padding: 16, gap: 10 }}>
+          <Text style={s.heading}>Pick a model for this phone</Text>
+          <Text style={s.muted}>
+            The model downloads once, then runs entirely on this device — no API key, no server,
+            works offline. It is a small model: chat only, no tools, no access to your apps or
+            files, and simpler answers than the cloud brain.
+          </Text>
+          {LOCAL_MODELS.map((model) => {
+            const isLoaded =
+              state.stage !== "idle" && state.modelId === model.id && state.stage !== "error";
+            const isDownloadingThis = downloading && state.modelId === model.id;
+            const isCached = cachedModelIds?.includes(model.id) ?? false;
+            const canDelete = canDeleteModelCache(model.id, state, cachedModelIds ?? []);
+            const isDeletingThis = deletingModelId === model.id;
+            return (
+              <View key={model.id} style={{ gap: 6, paddingTop: 6 }}>
+                <View style={[s.row, { gap: 8, flexWrap: "wrap" }]}>
+                  <Text style={[s.text, { fontWeight: "600" }]}>{model.label}</Text>
+                  <Chip>{`About ${formatBytes(model.downloadBytes)} download`}</Chip>
+                  {isLoaded && !isDownloadingThis && <Chip tint={colors.sky}>Loaded</Chip>}
+                  {isCached && !isLoaded && <Chip>Downloaded ✓</Chip>}
+                </View>
+                <Text style={s.muted}>{model.blurb}</Text>
+                {!isCached && <Text style={s.small}>{downloadWarning(model)}</Text>}
+                {isDownloadingThis ? (
+                  <View style={{ gap: 6 }}>
+                    <View
+                      style={{
+                        height: 8,
+                        borderRadius: 4,
+                        backgroundColor: "#EEEEF0",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <View
+                        style={{
+                          height: 8,
+                          width: `${Math.round(state.progress * 100)}%`,
+                          backgroundColor: colors.blue,
+                        }}
+                      />
+                    </View>
+                    <Text style={s.small}>
+                      {`Downloading… ${Math.round(state.progress * 100)}%`}
+                      {state.note ? ` — ${state.note}` : ""}
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={[s.row, { gap: 8, flexWrap: "wrap" }]}>
+                    <Button
+                      small
+                      disabled={downloading || (isLoaded && state.modelId === model.id)}
+                      onPress={() => startModel(model.id)}
+                      style={{ alignSelf: "flex-start" }}
+                    >
+                      {isLoaded
+                        ? "Using this model"
+                        : isCached
+                          ? "Use this model"
+                          : "Download & use this model"}
+                    </Button>
+                    {canDelete && (
+                      <Button
+                        small
+                        disabled={deletingModelId !== null || downloading}
+                        onPress={() => removeDownload(model.id)}
+                        style={{ alignSelf: "flex-start" }}
+                      >
+                        {isDeletingThis
+                          ? "Removing…"
+                          : `Remove download (free ${formatBytes(model.downloadBytes)})`}
+                      </Button>
+                    )}
+                  </View>
+                )}
+                {isCached && isLoaded && !isDownloadingThis && (
+                  <Text style={s.small}>
+                    To free its space, switch to another model first — then its Remove button
+                    appears here.
+                  </Text>
+                )}
+              </View>
+            );
+          })}
+          {state.stage === "error" && (
+            <>
+              <ErrorNotice error={state.note} />
+              <Button small onPress={() => startModel(modelId)} style={{ alignSelf: "flex-start" }}>
+                Try loading again
+              </Button>
+            </>
+          )}
+        </Card>
+
         {!messages.length ? (
           <Text style={[s.muted, { textAlign: "center", paddingVertical: 20, lineHeight: 22 }]}>
             {state.stage === "ready"

@@ -330,6 +330,9 @@ const FINISHED_STATUSES = new Set([
   "succeeded",
   "failed",
   "cancelled",
+  // Terminal Critic block (D1): the task DID finish — with a reason
+  // the operator should see, in the finished bucket like "failed".
+  "blocked",
   "blocked_config",
   "delivery_failed",
   "delivery_unverified",

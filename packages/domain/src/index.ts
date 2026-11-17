@@ -12,7 +12,8 @@ export type Section =
   | "connections"
   | "ideas"
   | "goals"
-  | "apps";
+  | "apps"
+  | "news";
 export interface Mail {
   id: string;
   threadId: string;
@@ -25,6 +26,17 @@ export interface Mail {
   unread: boolean;
   label: string;
   attachments: string[];
+}
+export interface NewsItem {
+  headline: string;
+  source: string | null;
+  url: string | null;
+}
+export interface NewsBriefing {
+  id: string;
+  title: string;
+  items: NewsItem[];
+  createdAt: string;
 }
 export interface CalendarEvent {
   id: string;
@@ -162,6 +174,15 @@ export interface ActivityEntry {
   status: string;
   actionId?: string;
 }
+/**
+ * A human-worded note that one part of the workspace could not be
+ * loaded this time. The message is authored by the server for the
+ * owner — it never carries a provider's raw error wording.
+ */
+export interface WorkspaceNotice {
+  source: "mail" | "events";
+  message: string;
+}
 export interface Connection {
   id: string;
   name: string;
@@ -174,6 +195,8 @@ export interface Workspace {
   profile: { name: string; email: string };
   mail: Mail[];
   events: CalendarEvent[];
+  /** Parts of the workspace that are temporarily unavailable (human wording). */
+  notices: WorkspaceNotice[];
   files: Artifact[];
   browsers: BrowserSession[];
   actions: ActionProposal[];
