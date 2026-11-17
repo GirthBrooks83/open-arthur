@@ -55,7 +55,7 @@ export class TaskWorker {
     this.timer = setInterval(() => {
       // Timer callbacks cannot await runs; each run owns its durable error state.
       void this.tick().catch((error) => backgroundFailure("task worker tick", error));
-    }, this.options.pollMs ?? 1000);
+    }, this.options.pollMs ?? 5000);
     void this.tick().catch((error) => backgroundFailure("initial task worker tick", error));
   }
   async stop() {
@@ -79,7 +79,13 @@ export class TaskWorker {
     this.ticking = true;
     this.lastTickAt = new Date(this.now()).toISOString();
     try {
-      const records = await this.db.scan<AgentTask>("tasks");
+      // Filtered due-work query (Supabase egress fix F1): the store
+      // returns exactly the records the two passes below can act on
+      // — crashed-monitor resolution and the due filter — instead of
+      // the whole tasks kind on every poll. The passes re-apply
+      // their in-memory conditions unchanged, so behavior is
+      // identical for any record the query returns.
+      const records = await this.db.scanDueTasks<AgentTask>(new Date(this.now()).toISOString());
       // Resolve crashed scheduled attempts BEFORE collecting due
       // work: a monitor task still marked running with an expired
       // lease is a mid-flight crash, not a resumable checkpoint
