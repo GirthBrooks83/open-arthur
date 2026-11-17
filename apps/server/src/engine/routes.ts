@@ -7,6 +7,7 @@ import type {
   AgentNotification,
 } from "../../../../packages/domain/src/agent.ts";
 import { AppError } from "../errors.ts";
+import { newsBriefingInputSchema } from "./news.ts";
 import type { AgentService } from "./service.ts";
 import { skillManageOpSchema } from "./skills.ts";
 
@@ -246,6 +247,20 @@ export function agentRoutes(service: AgentService): Hono<{ Variables: { owner: s
       .parse({ limit: c.req.query("limit") });
     return c.json(await service.dailyBriefs(c.get("owner"), limit));
   });
+  // News (engine/news.ts): editions filed off to the side by the
+  // news lane land through the add route; the News page reads the
+  // list route, newest first. Filing is a plain authenticated
+  // write — no fetching or scheduling lives behind these routes.
+  app.post("/news", async (c) => {
+    const body = newsBriefingInputSchema.parse(await c.req.json());
+    return c.json(await service.addNewsBriefing(c.get("owner"), body), 201);
+  });
+  app.get("/news", async (c) => {
+    const { limit } = z
+      .object({ limit: z.coerce.number().int().min(1).max(100).default(20) })
+      .parse({ limit: c.req.query("limit") });
+    return c.json(await service.newsBriefings(c.get("owner"), limit));
+  });
   // Content-free audit log (engine/audit.ts): recent lifecycle
   // events for this owner, newest first. Events carry counts only
   // by construction, so this surface needs no content review. The
@@ -256,6 +271,61 @@ export function agentRoutes(service: AgentService): Hono<{ Variables: { owner: s
       .parse({ limit: c.req.query("limit") });
     return c.json(await service.auditEvents(c.get("owner"), limit));
   });
+  // Approval Center (engine/approval-center.ts + approval-executor.ts,
+  // gated by engine/approval-actions.ts): version-exact approvals for
+  // restricted actions — merges and deploys are the first call sites
+  // routed through the executor. The control route is the ONLY surface
+  // that can change approval state, and approve_exact_version must
+  // name the version it approves; the messages route is discussion
+  // only and can never approve anything, whatever the text says.
+  const approvalCreateSchema = z.object({
+    title: z.string().trim().min(1).max(200),
+    action: z.string().trim().min(1).max(200),
+    details: z.string().trim().min(1).max(12000),
+    evidence: z.string().trim().min(1).max(12000).optional(),
+  });
+  app.post("/approvals", async (c) => {
+    const body = approvalCreateSchema.parse(await c.req.json());
+    return c.json(await service.createApproval(c.get("owner"), body), 201);
+  });
+  app.get("/approvals", async (c) => c.json(await service.listApprovals(c.get("owner"))));
+  app.get("/approvals/:id", async (c) =>
+    c.json(await service.approval(c.get("owner"), c.req.param("id"))),
+  );
+  app.post("/approvals/:id/messages", async (c) => {
+    const body = z
+      .object({
+        from: z.string().trim().min(1).max(80),
+        text: z.string().trim().min(1).max(12000),
+      })
+      .parse(await c.req.json());
+    return c.json(await service.postApprovalMessage(c.get("owner"), c.req.param("id"), body), 201);
+  });
+  app.post("/approvals/:id/revise", async (c) => {
+    const body = approvalCreateSchema.omit({ title: true }).parse(await c.req.json());
+    return c.json(await service.reviseApproval(c.get("owner"), c.req.param("id"), body));
+  });
+  app.post("/approvals/:id/control", async (c) => {
+    const body = z
+      .object({
+        control: z.enum([
+          "approve_exact_version",
+          "reject",
+          "request_changes",
+          "keep_pending",
+          "stop_operation",
+        ]),
+        version: z.number().int().positive().optional(),
+        note: z.string().trim().min(1).max(2000).optional(),
+      })
+      .parse(await c.req.json());
+    return c.json(
+      await service.controlApproval(c.get("owner"), c.req.param("id"), body.control, body),
+    );
+  });
+  app.post("/approvals/:id/execute", async (c) =>
+    c.json(await service.executeApproval(c.get("owner"), c.req.param("id"))),
+  );
   app.post("/notifications/:id/read", async (c) => {
     const notification = await service.db.compareAndSwap<AgentNotification>(
       c.get("owner"),

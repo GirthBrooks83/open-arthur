@@ -10,10 +10,12 @@ import {
   Lightbulb,
   ListChecks,
   Mail,
+  Newspaper,
   Pause,
   Play,
   Plus,
   RefreshCw,
+  ShieldCheck,
   Square,
   Target,
   Users,
@@ -1725,6 +1727,18 @@ export function AppsScreen() {
       title: "Files",
       detail: "PDFs, forms and filled copies",
       icon: FileText,
+    },
+    {
+      section: "approvals" as const,
+      title: "Approvals",
+      detail: "Approve merges and deploys, exact version by exact version",
+      icon: ShieldCheck,
+    },
+    {
+      section: "news" as const,
+      title: "News",
+      detail: "News briefings, newest first",
+      icon: Newspaper,
     },
   ];
   return (

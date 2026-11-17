@@ -10,7 +10,14 @@ import type { Config } from "../config.ts";
 //                                   on a successful (2xx) response;
 //                                   each lane exposes that endpoint
 //                                   (see engine/mem0.ts etc.).
-//   omniroute / anythingllm / n8n -> GET <url>/ (the base URL itself);
+//   anythingllm            -> GET <url>/api/ping, live only on a 2xx
+//                                   whose body is { online: true } —
+//                                   the adapter's real-request check
+//                                   (see engine/anythingllm.ts): any
+//                                   HTTP response is NOT enough, a
+//                                   squatter on the port is not the
+//                                   service.
+//   omniroute / n8n        -> GET <url>/ (the base URL itself);
 //                                   ANY HTTP response — even a 404 or
 //                                   an auth challenge — proves the
 //                                   service is reachable; only a
@@ -66,7 +73,8 @@ const DEFAULT_TTL_MS = 60_000;
 type LaneKey = keyof LaneProbeTargets;
 
 const HEALTH_PATH_LANES: readonly LaneKey[] = ["mem0", "graphiti", "hindsight", "browser"];
-const BASE_URL_LANES: readonly LaneKey[] = ["omniroute", "anythingllm", "n8n"];
+const BASE_URL_LANES: readonly LaneKey[] = ["omniroute", "n8n"];
+const API_PING_LANES: readonly LaneKey[] = ["anythingllm"];
 
 function cleanBase(url: string | undefined): string | undefined {
   const trimmed = url?.trim();
@@ -176,6 +184,7 @@ export class LaneProbe {
   }
 
   private async probeOne(key: LaneKey, baseUrl: string): Promise<boolean> {
+    if (API_PING_LANES.includes(key)) return this.probeApiPing(baseUrl);
     const isHealthLane = HEALTH_PATH_LANES.includes(key);
     const url = isHealthLane ? `${baseUrl}/health` : baseUrl;
     try {
@@ -191,6 +200,25 @@ export class LaneProbe {
         // Cancelling is best-effort hygiene only.
       }
       return isHealthLane ? response.ok : true;
+    } catch {
+      return false;
+    }
+  }
+
+  // The AnythingLLM check, shared with the adapter (engine/
+  // anythingllm.ts): GET /api/ping must answer 2xx with the service's
+  // own { online: true } body. Anything else — a 404 from a squatter,
+  // an { online: false }, a non-JSON reply — is not live.
+  private async probeApiPing(baseUrl: string): Promise<boolean> {
+    try {
+      const response = await this.fetchFn(`${baseUrl}/api/ping`, {
+        method: "GET",
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (!response.ok) return false;
+      const body: unknown = await response.json();
+      if (!body || typeof body !== "object") return false;
+      return (body as { online?: unknown }).online === true;
     } catch {
       return false;
     }
@@ -221,3 +249,4 @@ export function laneProbeFor(
 // without duplicating the health-path vs base-URL distinction.
 export const LANE_PROBE_HEALTH_PATH_LANES = HEALTH_PATH_LANES;
 export const LANE_PROBE_BASE_URL_LANES = BASE_URL_LANES;
+export const LANE_PROBE_API_PING_LANES = API_PING_LANES;

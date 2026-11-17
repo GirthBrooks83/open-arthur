@@ -14,6 +14,7 @@ import {
   Inbox,
   Link2,
   Mail,
+  Newspaper,
   Plus,
   Search,
   ShieldCheck,
@@ -37,6 +38,7 @@ import type {
   BrowserSession,
   CalendarEvent,
   EmailDraft,
+  NewsBriefing,
 } from "../../../packages/domain/src";
 import { API_URL } from "./api";
 import { localDateTime, zonedInstant } from "./date-time";
@@ -78,6 +80,11 @@ export function TodayScreen() {
     .sort((a, b) => a.start.localeCompare(b.start));
   return (
     <View style={{ gap: 25 }}>
+      {w.notices.map((notice) => (
+        <Card key={notice.source} style={{ padding: 16 }}>
+          <Text style={s.muted}>{notice.message}</Text>
+        </Card>
+      ))}
       <View
         style={[
           {
@@ -499,6 +506,13 @@ export function MailScreen() {
         </Button>
       </View>
       <ErrorNotice error={error} />
+      {w.notices
+        .filter((notice) => notice.source === "mail")
+        .map((notice) => (
+          <Card key={notice.source} style={{ padding: 16 }}>
+            <Text style={s.muted}>{notice.message}</Text>
+          </Card>
+        ))}
       <Card>
         <View style={[s.row, { gap: 10, marginBottom: 15, flexWrap: "wrap" }]}>
           <Button small primary={tab === "all"} onPress={() => setTab("all")}>
@@ -1167,6 +1181,77 @@ export function ActivityScreen() {
           />
         </Card>
       )}
+    </View>
+  );
+}
+export function NewsScreen() {
+  const { api } = useWorkspace();
+  const [briefings, setBriefings] = useState<NewsBriefing[]>();
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let live = true;
+    api
+      .request<NewsBriefing[]>("/api/agent/news")
+      .then((next) => {
+        if (live) setBriefings(next);
+      })
+      .catch((e) => {
+        if (live) setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      live = false;
+    };
+  }, [api]);
+  if (error) return <ErrorNotice error={error} />;
+  if (!briefings)
+    return (
+      <View style={{ paddingVertical: 30, alignItems: "center" }}>
+        <ActivityIndicator color={colors.blueDark} />
+      </View>
+    );
+  if (!briefings.length)
+    return (
+      <Card>
+        <Empty
+          icon={Newspaper}
+          title="No news filed yet"
+          detail="Briefings Arthur files will land here, newest first — off to the side, out of your chat."
+        />
+      </Card>
+    );
+  return (
+    <View style={{ gap: 20 }}>
+      {briefings.map((briefing) => (
+        <Card key={briefing.id} style={{ gap: 6 }}>
+          <SectionHeading title={briefing.title} />
+          <Text style={s.small}>
+            {dateLabel(briefing.createdAt)} · {timeLabel(briefing.createdAt)}
+          </Text>
+          {briefing.items.map((item, i) => (
+            <View
+              key={`${briefing.id}-${item.headline}-${item.url ?? ""}`}
+              style={{
+                paddingVertical: 10,
+                borderTopWidth: i ? 1 : 0,
+                borderTopColor: colors.line,
+                gap: 3,
+              }}
+            >
+              <Text style={s.text}>{item.headline}</Text>
+              {!!item.source && <Text style={s.small}>{item.source}</Text>}
+              {!!item.url && (
+                <Pressable
+                  accessibilityRole="link"
+                  accessibilityLabel={`Open source for: ${item.headline}`}
+                  onPress={() => void Linking.openURL(item.url as string)}
+                >
+                  <Text style={[s.small, { color: colors.blueDark }]}>Read the story</Text>
+                </Pressable>
+              )}
+            </View>
+          ))}
+        </Card>
+      ))}
     </View>
   );
 }
