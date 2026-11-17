@@ -23,6 +23,7 @@ let healthyStub: Server,
   healthyHits = 0;
 let failingStub: Server, failingUrl: string;
 let baseStub: Server, baseUrl: string;
+let anythingStub: Server, anythingUrl: string;
 
 before(async () => {
   // Memory-lane style stub: /health answers 200.
@@ -55,7 +56,7 @@ before(async () => {
   failingUrl = `http://127.0.0.1:${failingAddress.port}`;
 
   // Base-URL lane stub: the root answers 404 (no health endpoint) —
-  // for omniroute/anythingllm/n8n any HTTP response proves reachability.
+  // for omniroute/n8n any HTTP response proves reachability.
   baseStub = createServer((_request, response) => {
     response.writeHead(404);
     response.end("root");
@@ -65,10 +66,26 @@ before(async () => {
   const baseAddress = baseStub.address();
   assert(baseAddress && typeof baseAddress !== "string");
   baseUrl = `http://127.0.0.1:${baseAddress.port}`;
+
+  // AnythingLLM stub: /api/ping answers the service's own shape.
+  anythingStub = createServer((request, response) => {
+    if (request.url === "/api/ping") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ online: true }));
+    } else {
+      response.writeHead(404);
+      response.end("nope");
+    }
+  });
+  anythingStub.listen(0, "127.0.0.1");
+  await once(anythingStub, "listening");
+  const anythingAddress = anythingStub.address();
+  assert(anythingAddress && typeof anythingAddress !== "string");
+  anythingUrl = `http://127.0.0.1:${anythingAddress.port}`;
 });
 
 after(async () => {
-  for (const stub of [healthyStub, failingStub, baseStub]) {
+  for (const stub of [healthyStub, failingStub, baseStub, anythingStub]) {
     stub?.closeAllConnections();
     await new Promise<void>((resolve) => stub.close(() => resolve()));
   }
@@ -81,7 +98,7 @@ test("probe reports stub lanes by their real answers", async () => {
       graphiti: failingUrl,
       hindsight: "http://127.0.0.1:1", // nothing listens: dead lane
       omniroute: baseUrl,
-      anythingllm: healthyUrl,
+      anythingllm: anythingUrl,
       browser: healthyUrl,
       // n8n left unconfigured
     },
@@ -111,9 +128,63 @@ test("probe reports stub lanes by their real answers", async () => {
     true,
     "any response on the base URL is reachable",
   );
-  assert.equal(snapshot.integrationsLive.anythingllm, true);
+  assert.equal(snapshot.integrationsLive.anythingllm, true, "real /api/ping answer is live");
   assert.equal(snapshot.integrationsLive.n8n, null, "unconfigured stays null");
   assert.equal(snapshot.browserLive, true, "worker /health 200 is live");
+});
+
+test("anythingllm live requires the service's own ping answer, not any response", async () => {
+  // A squatter that answers every path with 200 but never speaks the
+  // AnythingLLM ping shape is NOT live — reachability is not health.
+  const squatter = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: true }));
+  });
+  squatter.listen(0, "127.0.0.1");
+  await once(squatter, "listening");
+  const squatterAddress = squatter.address();
+  assert(squatterAddress && typeof squatterAddress !== "string");
+  const squatterUrl = `http://127.0.0.1:${squatterAddress.port}`;
+  try {
+    const probe = new LaneProbe({ anythingllm: squatterUrl, n8n: baseUrl }, fetch, {
+      timeoutMs: 1000,
+    });
+    const snapshot = await probe.refresh();
+    assert.equal(
+      snapshot.integrationsLive.anythingllm,
+      false,
+      "200 with the wrong body is not the service answering",
+    );
+    assert.equal(
+      snapshot.integrationsLive.n8n,
+      true,
+      "base-URL lanes still count any response (unchanged semantics)",
+    );
+
+    // { online: false } on the ping endpoint is also not live.
+    const offline = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ online: false }));
+    });
+    offline.listen(0, "127.0.0.1");
+    await once(offline, "listening");
+    const offlineAddress = offline.address();
+    assert(offlineAddress && typeof offlineAddress !== "string");
+    try {
+      const offlineProbe = new LaneProbe(
+        { anythingllm: `http://127.0.0.1:${offlineAddress.port}` },
+        fetch,
+        { timeoutMs: 1000 },
+      );
+      assert.equal((await offlineProbe.refresh()).integrationsLive.anythingllm, false);
+    } finally {
+      offline.closeAllConnections();
+      await new Promise<void>((resolve) => offline.close(() => resolve()));
+    }
+  } finally {
+    squatter.closeAllConnections();
+    await new Promise<void>((resolve) => squatter.close(() => resolve()));
+  }
 });
 
 test("a hanging lane times out as false and never throws", async () => {

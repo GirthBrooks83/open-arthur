@@ -121,6 +121,10 @@ export interface IntegrationEndpoints {
   hindsightUrl?: string;
   n8nUrl?: string;
   anythingLlmUrl?: string;
+  // Developer-API key for the AnythingLLM adapter (engine/anythingllm.ts).
+  // The URL alone enables the lane (ping needs no auth); the key is
+  // what unlocks the workspace/chat calls.
+  anythingLlmApiKey?: string;
 }
 let warnedInvalidMaxOutputTokens = false;
 
@@ -231,6 +235,7 @@ export function readConfig(): Config {
       hindsightUrl: process.env.HINDSIGHT_URL,
       n8nUrl: process.env.N8N_URL,
       anythingLlmUrl: process.env.ANYTHINGLLM_URL,
+      anythingLlmApiKey: process.env.ANYTHINGLLM_API_KEY,
     },
     allowedOrigins: (
       process.env.ALLOWED_ORIGINS ?? "http://localhost:8081,http://127.0.0.1:8081"

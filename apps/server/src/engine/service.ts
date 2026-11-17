@@ -33,6 +33,7 @@ import { AppError } from "../errors.ts";
 import type { Files } from "../files.ts";
 import { backgroundFailure } from "../log.ts";
 import type { WorkspaceService } from "../workspace.ts";
+import { type AnythingLlmLane, anythingLlmLaneFor } from "./anythingllm.ts";
 import { type ApprovalActionRunners, ApprovalGate } from "./approval-actions.ts";
 import type {
   ApprovalControl,
@@ -179,6 +180,11 @@ export class AgentService {
   // recall). Configured only when HINDSIGHT_URL is set;
   // failure-swallowing like the other lanes (see engine/hindsight.ts).
   readonly hindsight: HindsightLane;
+  // AnythingLLM, the workspace / RAG surface. Configured only when
+  // ANYTHINGLLM_URL is set; failure-swallowing like the memory lanes
+  // (see engine/anythingllm.ts). Held here so agent work can chat
+  // with a workspace through the adapter instead of raw fetches.
+  readonly anythingllm: AnythingLlmLane;
   // Content-free audit log (engine/audit.ts): the cross-task
   // lifecycle record. Emissions are counts only — see recordAudit.
   readonly auditLog: AuditLog;
@@ -215,6 +221,7 @@ export class AgentService {
     this.mem0 = mem0LaneFor(config);
     this.graphiti = graphitiLaneFor(config);
     this.hindsight = hindsightLaneFor(config);
+    this.anythingllm = anythingLlmLaneFor(config);
     this.auditLog = new AuditLog(db);
     this.briefSlack = dailyBriefSlackFor(config);
     this.approvals = new ApprovalGate(db, approvalRunners, (owner, version) =>
