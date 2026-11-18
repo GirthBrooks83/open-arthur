@@ -125,6 +125,11 @@ export interface IntegrationEndpoints {
   // The URL alone enables the lane (ping needs no auth); the key is
   // what unlocks the workspace/chat calls.
   anythingLlmApiKey?: string;
+  // Default workspace slug for the chat_knowledge_workspace agent tool
+  // (engine/conversation.ts). Unset means the tool resolves the target
+  // from the lane at call time: the only workspace the key can see, or
+  // an honest error naming the choices when there are several.
+  anythingLlmWorkspace?: string;
 }
 let warnedInvalidMaxOutputTokens = false;
 
@@ -236,6 +241,7 @@ export function readConfig(): Config {
       n8nUrl: process.env.N8N_URL,
       anythingLlmUrl: process.env.ANYTHINGLLM_URL,
       anythingLlmApiKey: process.env.ANYTHINGLLM_API_KEY,
+      anythingLlmWorkspace: process.env.ANYTHINGLLM_WORKSPACE,
     },
     allowedOrigins: (
       process.env.ALLOWED_ORIGINS ?? "http://localhost:8081,http://127.0.0.1:8081"
