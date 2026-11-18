@@ -257,13 +257,21 @@ test("a completion grounded by a surviving recall match succeeds with no tool re
 });
 
 test("an ungrounded completion ends terminally blocked with the refusal and a reason, never the model's claim", async (t) => {
+  // Round 4 (2026-11-18): the exemplar is a CURRENT-fact claim —
+  // general knowledge ("What is the capital of France?", this
+  // test's pre-round-4 prompt) is checked but no longer blocked;
+  // a claim about today's weather with no evidence and no tool
+  // result still is.
   const run = await startTask(
     t,
     (index) =>
       index === 0
-        ? { name: "finish_task", arguments: { summary: "The capital of France is Paris." } }
+        ? {
+            name: "finish_task",
+            arguments: { summary: "It is sunny and 72 degrees in Astoria today." },
+          }
         : { text: "Done." },
-    "What is the capital of France?",
+    "What is today's weather in Astoria?",
   );
   try {
     await run.server.agent.worker.tick();

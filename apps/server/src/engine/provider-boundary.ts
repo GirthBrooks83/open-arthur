@@ -51,7 +51,44 @@ export class EngineError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "EngineError";
+    rememberEngineAuthoredMessage(message);
   }
+}
+
+// The AG-UI event stream is a string-only boundary: when a run
+// fails, the runtime emits a RUN_ERROR event carrying the error's
+// message and nothing else, so by the time the chat path (and the
+// task runner's event branch) translates it, the EngineError
+// object — and its marker — no longer exist (PR #47 evidence,
+// 2026-11-18: the same engine message passed through as an object
+// and was replaced by the generic provider text as a bare string).
+// The marker therefore also travels as the message itself: every
+// message an EngineError is constructed with in this process is
+// remembered here, and humanProviderError recognizes a bare string
+// that exactly matches one as engine-authored. Registration happens
+// ONLY in the EngineError constructor — provider text cannot
+// register itself — and recognition is exact-match, so the only
+// strings that pass are wordings the engine itself produced (each
+// user-safe by construction). The set is capped; the oldest
+// registrations fall out first.
+const ENGINE_AUTHORED_MESSAGE_CAP = 512;
+const engineAuthoredMessages = new Set<string>();
+
+function rememberEngineAuthoredMessage(message: string): void {
+  if (!message) return;
+  engineAuthoredMessages.delete(message);
+  engineAuthoredMessages.add(message);
+  while (engineAuthoredMessages.size > ENGINE_AUTHORED_MESSAGE_CAP) {
+    const oldest = engineAuthoredMessages.values().next().value;
+    if (oldest === undefined) break;
+    engineAuthoredMessages.delete(oldest);
+  }
+}
+
+// Whether a bare message string is one an EngineError produced in
+// this process (see above). Exported for the boundary's tests.
+export function isEngineAuthoredMessage(message: string): boolean {
+  return engineAuthoredMessages.has(message);
 }
 
 // Duck-typed on the marker as well as the class, so an engine error
@@ -86,7 +123,9 @@ function rawMessage(error: unknown): string {
 }
 
 // Map an error to the message the user may see, by origin:
-// - Engine-authored errors (EngineError marker, or one of the two
+// - Engine-authored errors (EngineError marker, a bare string an
+//   EngineError produced in this process — the string-only AG-UI
+//   event boundary, see the registry above — or one of the two
 //   legacy engine messages above) pass through with their own
 //   wording — they were written for the user.
 // - Provider errors are translated: a payload/format rejection gets
@@ -103,6 +142,7 @@ function rawMessage(error: unknown): string {
 export function humanProviderError(error: unknown): string {
   const raw = rawMessage(error);
   if (isEngineAuthoredError(error)) return raw;
+  if (isEngineAuthoredMessage(raw)) return raw;
   if (INTERNAL_MESSAGES.some((message) => raw.startsWith(message))) return raw;
   if (
     /unsupported content|content types|content fields|invalid (message|payload|request|argument)|tool[_ ]calls?/i.test(
