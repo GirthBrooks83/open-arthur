@@ -232,7 +232,7 @@ test("a critic-blocked task emits task.critic_blocked and no completion", async 
   const db = await createStore();
   await modelFixture(t, (index) =>
     index === 0
-      ? { name: "finish_task", arguments: { summary: "The capital of France is Paris." } }
+      ? { name: "finish_task", arguments: { summary: "Your dentist appointment is on Tuesday." } }
       : { text: "Done." },
   );
   const server = await createApp(db, {
@@ -247,8 +247,11 @@ test("a critic-blocked task emits task.critic_blocked and no completion", async 
     allowedOrigins: [],
   });
   try {
+    // Round 4 (2026-11-18): a stored-state claim is the blocked
+    // exemplar — general knowledge (the pre-round-4 prompt here)
+    // is checked but no longer blocked.
     const task = await server.agent.createTask("owner", {
-      prompt: "What is the capital of France?",
+      prompt: "When is my dentist appointment?",
       kind: "agent",
     });
     await server.agent.worker.tick();

@@ -7,6 +7,7 @@ import { createApp } from "../apps/server/src/app.ts";
 import { createStore } from "../apps/server/src/db.ts";
 import {
   CRITIC_BLOCKED_REASON,
+  gateRequiresEvidence,
   INSUFFICIENT_EVIDENCE,
   requiresEvidence,
 } from "../apps/server/src/engine/verifier.ts";
@@ -165,9 +166,19 @@ test("a recall task with surviving evidence still passes the critic", async (t) 
     const detail = await run.server.agent.detail("owner", run.task.id);
     assert.equal(detail.task.status, "succeeded", detail.task.error ?? detail.task.question);
     assert.equal(detail.task.result, "The workshop is in Astoria.");
+    // The evidence was really collected and the completion is
+    // grounded in it (the researcher + critic stages say so).
+    const researcher = detail.task.stageTrace?.find((entry) => entry.agent === "researcher");
+    assert.ok((researcher?.metrics.evidence_count as number) >= 1);
     const critic = detail.task.stageTrace?.find((entry) => entry.agent === "critic");
     assert.equal(critic?.outcome, "completed");
-    assert.equal(critic?.metrics.evidence_gate, true);
+    // Round 4: this prompt's shape is a general question (no
+    // possessive, no current-fact signal), so the BLOCK does not
+    // apply to it — it passes because it is grounded, and would
+    // now ship even ungrounded (see the round-4 tests below). The
+    // gate still blocks the stored-state form of a recall ask:
+    // "When is my dentist appointment?" in the next test.
+    assert.equal(critic?.metrics.evidence_gate, false);
     assert.equal(critic?.metrics.approved, true);
   } finally {
     await run.done();
@@ -207,6 +218,108 @@ test("a recall task with NO evidence ends terminally blocked, with a human-reada
     await run.server.agent.worker.tick();
     const after = await run.server.agent.getTask("owner", run.task.id);
     assert.equal(after.status, "blocked");
+  } finally {
+    await run.done();
+  }
+});
+
+// Round 4 (chat-path reliability, 2026-11-18): requiresEvidence
+// still classifies every factual claim, but the gate's BLOCK now
+// covers only claims the model cannot legitimately make from its
+// own knowledge — the user's stored state and current world
+// facts. Joseph hit the round-3 scope live on 2026-11-17: a plain
+// general question failed with the insufficient-evidence refusal
+// because no memory matched it and no tool ran.
+test("gateRequiresEvidence blocks stored-state and current-fact claims, not general knowledge", () => {
+  // Stored state: the answer is a fact about the user's own life.
+  assert.equal(gateRequiresEvidence("When is my dentist appointment?"), true);
+  assert.equal(
+    gateRequiresEvidence("What is my name, and what are my three top priorities?"),
+    true,
+  );
+  assert.equal(gateRequiresEvidence("Is my calendar free on Friday?"), true);
+  assert.equal(gateRequiresEvidence("List my open tasks"), true);
+  assert.equal(gateRequiresEvidence("Summarize my latest email"), true);
+  assert.equal(gateRequiresEvidence("Remind me what I saved about the workshop"), true);
+  assert.equal(gateRequiresEvidence("Please list my open tasks"), true);
+  assert.equal(gateRequiresEvidence("Could you please tell me what my tasks are?"), true);
+  // Current world facts: training knowledge is stale; a source is
+  // required (memory evidence or a tool result).
+  assert.equal(gateRequiresEvidence("What is today's weather?"), true);
+  assert.equal(gateRequiresEvidence("Tell me today's weather."), true);
+  assert.equal(gateRequiresEvidence("Give me the current price of Bitcoin."), true);
+  assert.equal(gateRequiresEvidence("Can you tell me the latest news?"), true);
+  assert.equal(gateRequiresEvidence("Could you check the current price of Bitcoin?"), true);
+  // General knowledge: ordinary conversation. These still classify
+  // as factual claims (requiresEvidence stays true) — they are
+  // checked, not blocked.
+  assert.equal(requiresEvidence("What is the capital of France?"), true);
+  assert.equal(gateRequiresEvidence("What is the capital of France?"), false);
+  assert.equal(gateRequiresEvidence("Can you tell me the capital of France?"), false);
+  assert.equal(gateRequiresEvidence("How does photosynthesis work?"), false);
+  assert.equal(gateRequiresEvidence("Who wrote Hamlet?"), false);
+  // Instructions, creative work and chit-chat: ungated, as before.
+  assert.equal(gateRequiresEvidence("Reply with exactly: PING OK"), false);
+  assert.equal(gateRequiresEvidence("Tell me a joke"), false);
+  assert.equal(gateRequiresEvidence("Give me a poem about autumn"), false);
+  assert.equal(gateRequiresEvidence("Hello!"), false);
+  assert.equal(gateRequiresEvidence(""), false);
+});
+
+// The 2026-11-17 live failure, as a task: a plain general question
+// whose completion the model answers from its own knowledge, with
+// zero memory evidence and no tool call. Round 3 blocked it with
+// the refusal; round 4 ships it — still checked (a critic stage is
+// recorded), just not blocked.
+test("a general-knowledge task with zero memory evidence completes (the 2026-11-17 case)", async (t) => {
+  const run = await startTask(
+    t,
+    (index) =>
+      index === 0
+        ? { name: "finish_task", arguments: { summary: "The capital of France is Paris." } }
+        : { text: "Done." },
+    "What is the capital of France?",
+  );
+  try {
+    await run.server.agent.worker.tick();
+    const detail = await run.server.agent.detail("owner", run.task.id);
+    assert.equal(detail.task.status, "succeeded", detail.task.error ?? detail.task.question);
+    assert.equal(detail.task.result, "The capital of France is Paris.");
+    assert.notEqual(detail.task.state.criticBlocked, true);
+    const critic = detail.task.stageTrace?.find((entry) => entry.agent === "critic");
+    assert.equal(critic?.outcome, "completed");
+    assert.equal(critic?.metrics.evidence_gate, false);
+    assert.equal(critic?.metrics.approved, true);
+  } finally {
+    await run.done();
+  }
+});
+
+// The other half of round 4: a current-fact claim with no evidence
+// and no tool result still ends terminally blocked — the model
+// cannot know today's weather from training.
+test("a current-fact task with NO evidence still ends terminally blocked", async (t) => {
+  const run = await startTask(
+    t,
+    (index) =>
+      index === 0
+        ? {
+            name: "finish_task",
+            arguments: { summary: "It is sunny and 72 degrees in Astoria today." },
+          }
+        : { text: "Done." },
+    "What is today's weather in Astoria?",
+  );
+  try {
+    await run.server.agent.worker.tick();
+    const detail = await run.server.agent.detail("owner", run.task.id);
+    assert.equal(detail.task.status, "blocked");
+    assert.equal(detail.task.result, INSUFFICIENT_EVIDENCE);
+    assert.equal(detail.task.error, CRITIC_BLOCKED_REASON);
+    assert.equal(detail.task.state.criticBlocked, true);
+    const critic = detail.task.stageTrace?.find((entry) => entry.agent === "critic");
+    assert.equal(critic?.outcome, "blocked");
+    assert.equal(critic?.metrics.evidence_gate, true);
   } finally {
     await run.done();
   }

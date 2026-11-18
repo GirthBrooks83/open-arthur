@@ -271,39 +271,54 @@ export function critiqueAnswer(
 // to recall/report the user's own stored state. The service ALSO
 // applies the gate when the run attempted work tools (a completion
 // reporting tool outcomes needs backing whatever the prompt's
-// shape); this function judges the prompt alone.
-export function requiresEvidence(prompt: string): boolean {
-  const text = prompt.trim().toLowerCase();
-  if (!text) return false;
-  // Pure small talk (round 3): a greeting or pleasantry that is the
-  // WHOLE prompt asserts nothing and stays ungated. The guard is
-  // anchored at both ends so "Hello, what is my balance?" still
-  // reaches the factual checks below.
-  if (
-    /^(hi|hello|hey|good (morning|afternoon|evening)|thanks|thank you|how are you( doing)?|how'?s it going)[\s!.?]*$/.test(
-      text,
-    )
-  )
-    return false;
-  // Polite and modal lead-ins (round 3, Claude review of PR #47):
-  // the anchored checks below judge the request's CORE, so strip
-  // the wrappers people actually type — "Please tell me…", "Can you
-  // tell me…", "Could you please check…" — before matching them.
-  // The strip removes only the wrapper; the core still has to match
-  // a gated pattern on its own, so politeness alone never gates
-  // ("Can you write me a poem?" stays ungated).
-  const core = text.replace(
-    /^(please[,\s]+)?((can|could|would|will)\s+you\s+)?(please[,\s]+)?/,
-    "",
-  );
-  // A question asking for a fact: the completion asserts an answer.
+// shape); this function judges the prompt alone. Round 4 (below):
+// the BLOCK's scope is gateRequiresEvidence — requiresEvidence
+// still classifies every factual claim, but only stored-state and
+// current-fact claims (and tool-outcome reports) block when
+// ungrounded; general-knowledge claims are checked, not blocked.
+// Pure small talk (round 3): a greeting or pleasantry that is the
+// WHOLE prompt asserts nothing and stays ungated. The guard is
+// anchored at both ends so "Hello, what is my balance?" still
+// reaches the factual checks below.
+const SMALL_TALK =
+  /^(hi|hello|hey|good (morning|afternoon|evening)|thanks|thank you|how are you( doing)?|how'?s it going)[\s!.?]*$/;
+
+// Polite and modal lead-ins (round 3, Claude review of PR #47):
+// the anchored checks judge the request's CORE, so strip the
+// wrappers people actually type — "Please tell me…", "Can you
+// tell me…", "Could you please check…" — before matching them.
+// The strip removes only the wrapper; the core still has to match
+// a gated pattern on its own, so politeness alone never gates
+// ("Can you write me a poem?" stays ungated).
+function requestCore(text: string): string {
+  return text.replace(/^(please[,\s]+)?((can|could|would|will)\s+you\s+)?(please[,\s]+)?/, "");
+}
+
+// The factual-signal markers (round 2): a temporal marker (today,
+// current, latest, now, ...) or a live-topic marker (weather,
+// price, news, score, forecast, ...) — the signs that a claim is
+// about the CURRENT state of the world, which the model cannot
+// know from training and must source.
+const CURRENT_FACT_SIGNALS =
+  /\b(today|todays|current|currently|latest|now|tonight|tomorrow|yesterday|weather|forecast|price|prices|pricing|news|headlines?|scores?|stock|stocks|temperature|exchange rate)\b/;
+
+// The request's core in question form: a wh-question, or a yes/no
+// question (auxiliary lead-in and a question mark).
+function isQuestionForm(core: string): boolean {
   if (/^(what|when|where|who|whom|whose|which|why|how)\b/.test(core)) return true;
-  if (
+  return (
     /^(is|are|was|were|do|does|did|have|has|can|could|will|would|should|may|might)\b/.test(core) &&
     core.includes("?")
-  )
-    return true;
-  // Recall of stored facts, however phrased.
+  );
+}
+
+// Claims about the user's own stored state, however phrased:
+// explicit recall asks, "my <stored thing>" references, and
+// imperatives that ask to report stored state ("List my tasks").
+// These facts live in the user's memory, mail, calendar and task
+// records — nowhere else — so a completion asserting them needs
+// backing from those sources.
+function asksAboutStoredState(text: string, core: string): boolean {
   if (/\b(remind me|do you remember|remember when)\b/.test(text)) return true;
   if (
     /\bmy\b[^.?!]{0,24}\b(email|inbox|files?|documents?|tasks?|goals?|notes?|memories|records?|schedule|priorities)\b/.test(
@@ -312,8 +327,19 @@ export function requiresEvidence(prompt: string): boolean {
   )
     return true;
   if (/\bmy (calendar|events?|name|address|phone|accounts?)\b/.test(text)) return true;
-  // Imperatives that ask to report stored state ("List my tasks").
   if (/^(list|show|find|report)\b/.test(core) && /\bmy\b/.test(core)) return true;
+  return false;
+}
+
+export function requiresEvidence(prompt: string): boolean {
+  const text = prompt.trim().toLowerCase();
+  if (!text) return false;
+  if (SMALL_TALK.test(text)) return false;
+  const core = requestCore(text);
+  // A question asking for a fact: the completion asserts an answer.
+  if (isQuestionForm(core)) return true;
+  // Recall of stored facts, however phrased.
+  if (asksAboutStoredState(text, core)) return true;
   // Factual imperatives (round 2, ATLAS review of PR #47): an
   // information-fetch lead verb ("Tell me today's weather", "Give
   // me the current price of Bitcoin") asserts a world fact exactly
@@ -328,9 +354,7 @@ export function requiresEvidence(prompt: string): boolean {
   // creative content ("Check this draft", "Get me a coffee").
   if (
     /^(tell|give|show|check|fetch|get|find|search|report|look up|find out)\b/.test(core) &&
-    /\b(today|todays|current|currently|latest|now|tonight|tomorrow|yesterday|weather|forecast|price|prices|pricing|news|headlines?|scores?|stock|stocks|temperature|exchange rate)\b/.test(
-      core,
-    )
+    CURRENT_FACT_SIGNALS.test(core)
   )
     return true;
   // "Tell me" fact requests without a topic signal (round 3): the
@@ -349,6 +373,56 @@ export function requiresEvidence(prompt: string): boolean {
     ) &&
     (/\b(what|when|where|who|whom|whose|which|why|how)\b/.test(core) ||
       /\btell me (the|about the)\b/.test(core))
+  )
+    return true;
+  return false;
+}
+
+// --- Critic gate scope (round 4) ---
+//
+// requiresEvidence above classifies CLAIMS: a completion that
+// asserts any fact. The gate's BLOCK is narrower, and round 3's
+// scope was the defect Joseph hit live on 2026-11-17: a plain
+// general question ("What is the capital of France?" is the test
+// suite's own exemplar) failed with the insufficient-evidence
+// refusal because no memory matched it and no tool ran — it had
+// no path to "grounded", ever, no matter how ordinary the
+// question. A block exists for claims the model cannot
+// legitimately make from its own knowledge:
+// - facts about the user's stored state (their calendar, mail,
+//   tasks, memories) — those live in the lanes and records, and
+//   an ungrounded assertion about them is a fabrication about
+//   the user's own life;
+// - current world facts (today's weather, the current price) —
+//   training knowledge is stale the moment it matters, so the
+//   claim needs a source: memory evidence or a tool result.
+// A general-knowledge question is ordinary conversation: the
+// model's own knowledge is the source, there is no memory it
+// should match, and the completion ships — still CHECKED (the
+// critique is computed and recorded on the trace), just not
+// blocked. The service ALSO applies the gate when the run
+// attempted work tools: a completion reporting tool outcomes
+// needs backing whatever the prompt's shape.
+export function gateRequiresEvidence(prompt: string): boolean {
+  const text = prompt.trim().toLowerCase();
+  if (!text) return false;
+  if (SMALL_TALK.test(text)) return false;
+  const core = requestCore(text);
+  // Stored state, however phrased.
+  if (asksAboutStoredState(text, core)) return true;
+  // A question about the user's own state in any other phrasing
+  // ("When is my dentist appointment?", "Is my calendar free on
+  // Friday?"): the possessive on a question is the tell — the
+  // answer is a fact about the user, not the world.
+  if (isQuestionForm(core) && /\bmy\b/.test(core)) return true;
+  // Current world facts: a temporal or live-topic signal on a
+  // question, a fetch imperative, or a tell-me request (the same
+  // signal set as round 2's factual imperatives).
+  if (
+    CURRENT_FACT_SIGNALS.test(core) &&
+    (isQuestionForm(core) ||
+      /^(tell|give|show|check|fetch|get|find|search|report|look up|find out)\b/.test(core) ||
+      /\btell me\b/.test(core))
   )
     return true;
   return false;

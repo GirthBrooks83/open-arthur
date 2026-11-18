@@ -113,8 +113,8 @@ import {
   createPlan,
   critiqueAnswer,
   type EvidenceBundle,
+  gateRequiresEvidence,
   INSUFFICIENT_EVIDENCE,
-  requiresEvidence,
   type StageTrace,
   survivingMatches,
   VERIFICATION_FAILED,
@@ -1971,12 +1971,15 @@ export class AgentService {
   //   path (internal store -> Mem0 -> Graphiti -> Hindsight, the
   //   recallMemories merge order, filtered by the 0.75 coverage
   //   threshold) or from the task's own evidence, OR >=1 successful
-  //   tool result in the run. The gate is SCOPED (D1): it applies
-  //   only when the completion makes a claim that needs backing —
-  //   the prompt is a factual/recall request (verifier.ts
-  //   requiresEvidence), or the run attempted work tools and is
-  //   reporting on their outcomes. A general instruction outside
-  //   that scope ships ungrounded; the gate has nothing to check.
+  //   tool result in the run. The gate is SCOPED (D1, round 4 in
+  //   verifier.ts): it BLOCKS only when the completion makes a claim
+  //   the model cannot legitimately make from its own knowledge —
+  //   a fact about the user's stored state or a current world fact
+  //   (verifier.ts gateRequiresEvidence), or a report of the work
+  //   tools this run attempted. A general-knowledge completion is
+  //   still checked (the critique is computed and traced) but ships
+  //   ungrounded: ordinary conversation is not blocked for having
+  //   no memory match (the 2026-11-17 live failure).
   //   In scope and not grounded: the completion is NOT shipped —
   //   the task ends terminally "blocked" with the fixed
   //   insufficient-evidence refusal as its result and the
@@ -2048,7 +2051,7 @@ export class AgentService {
       ]),
     ];
     const attemptedWorkTools = attemptedTools.filter((name) => !NON_WORK_TOOLS.has(name));
-    const gateApplies = requiresEvidence(task.prompt) || attemptedWorkTools.length > 0;
+    const gateApplies = gateRequiresEvidence(task.prompt) || attemptedWorkTools.length > 0;
     const critique = critiqueAnswer(task.prompt, bundle, successfulToolResults);
     const documentCount = new Set(bundle.matches.map((match) => match.source)).size;
     const trace: StageTrace[] = [

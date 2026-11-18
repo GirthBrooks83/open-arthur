@@ -16,6 +16,7 @@ import {
   EngineError,
   humanProviderError,
   isEngineAuthoredError,
+  isEngineAuthoredMessage,
   PROVIDER_PAYLOAD_SNAG_MESSAGE,
   PROVIDER_REQUEST_FAILED_MESSAGE,
   sanitizeMessagesForProvider,
@@ -156,6 +157,40 @@ test("error classification is explicit: marked engine errors pass, unknown error
   const unknown = humanProviderError(new Error("pg pool exhausted at shard 7, conn 12"));
   assert.equal(unknown, PROVIDER_REQUEST_FAILED_MESSAGE);
   assert.ok(!unknown.includes("pg pool"));
+});
+
+// Chat-path reliability (2026-11-18, PR #47 Ask-1 follow-up): the
+// AG-UI event stream is a string-only boundary — a RUN_ERROR event
+// carries the error's message and nothing else, so the chat path's
+// event branch (conversation.ts) hands humanProviderError a bare
+// string and the EngineError marker is gone before it runs. The
+// evidence probe showed the same engine-authored message passing
+// through as an object and being replaced by the generic provider
+// text as a bare string. The marker now also travels as the
+// message itself: a string an EngineError produced in this process
+// is recognized as engine-authored.
+test("an engine-authored message survives the string-only RUN_ERROR event boundary", () => {
+  const engine = new EngineError("The workspace export is still being prepared");
+  // What the event branch actually receives: the message, alone.
+  const eventMessage: string = engine.message;
+  assert.ok(isEngineAuthoredMessage(eventMessage));
+  assert.equal(
+    humanProviderError(eventMessage),
+    "The workspace export is still being prepared",
+    "an engine-authored non-legacy message keeps its wording through the event branch",
+  );
+  // The two legacy messages still pass as bare strings too.
+  assert.equal(humanProviderError(new EngineError("Task interrupted").message), "Task interrupted");
+  // Fail-closed is unchanged for strings no EngineError produced:
+  // prose that merely READS like an engine message is not enough —
+  // registration happens only in the EngineError constructor.
+  assert.ok(!isEngineAuthoredMessage("The export pipeline stalled at step 3 of 9"));
+  assert.equal(
+    humanProviderError("The export pipeline stalled at step 3 of 9"),
+    PROVIDER_REQUEST_FAILED_MESSAGE,
+  );
+  // And a provider rejection string still translates.
+  assert.equal(humanProviderError(RAW_PROVIDER_ERROR), PROVIDER_PAYLOAD_SNAG_MESSAGE);
 });
 
 // Round 2 (item A, ATLAS review): round 1 flattened every content
@@ -449,5 +484,62 @@ test("a provider rejection surfaces the human message, never the raw provider st
     assert.ok("message" in event);
     assert.equal(event.message, PROVIDER_PAYLOAD_SNAG_MESSAGE);
     assert.ok(!String(event.message).includes("unsupported content"));
+  }
+});
+
+// The RUN_ERROR event branch end to end (2026-11-18): when the run
+// fails with an engine-authored message, the runtime's RUN_ERROR
+// event carries that message as a bare string — and the chat path
+// must surface the engine's own wording, not replace it with the
+// generic provider text (the PR #47 Ask-1 defect). The fixture
+// provider fails every call with the engine message as its error
+// wording, which is exactly the string the event branch receives.
+test("a chat run failing with an engine-authored message surfaces that message, not the generic one", async (t) => {
+  const ENGINE_MESSAGE = "The workspace export is still being prepared";
+  // Constructing the EngineError is what registers the wording as
+  // engine-authored in this process (see provider-boundary.ts).
+  assert.equal(new EngineError(ENGINE_MESSAGE).message, ENGINE_MESSAGE);
+  const failing = createServer((request, response) => {
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(400, { "Content-Type": "application/json" });
+      response.end(
+        JSON.stringify({
+          error: { message: ENGINE_MESSAGE, type: "invalid_request_error", code: "engine_busy" },
+        }),
+      );
+    });
+  });
+  failing.listen(0, "127.0.0.1");
+  await once(failing, "listening");
+  const address = failing.address();
+  assert.ok(address && typeof address !== "string");
+  const previousBase = process.env.OPENAI_BASE_URL;
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_BASE_URL = `http://127.0.0.1:${address.port}/v1`;
+  process.env.OPENAI_API_KEY = "local-test-fixture";
+  t.after(async () => {
+    if (previousBase === undefined) delete process.env.OPENAI_BASE_URL;
+    else process.env.OPENAI_BASE_URL = previousBase;
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+    failing.closeAllConnections();
+    await new Promise<void>((resolve) => failing.close(() => resolve()));
+  });
+  const { conversation } = await chatSetup(t);
+  const events = await lastValueFrom(
+    conversation
+      .run(runInput([{ id: "u1", role: "user", content: "Export my workspace please" }]))
+      .pipe(toArray()),
+  );
+  const runErrors = events.filter((event) => event.type === EventType.RUN_ERROR);
+  assert.ok(runErrors.length >= 1, "the run surfaces an error");
+  assert.ok(
+    runErrors.some((event) => "message" in event && event.message === ENGINE_MESSAGE),
+    `the engine wording survives the event branch; got: ${runErrors.map((event) => ("message" in event ? String(event.message) : "<no message>")).join(" | ")}`,
+  );
+  for (const event of runErrors) {
+    assert.ok("message" in event);
+    assert.notEqual(event.message, PROVIDER_REQUEST_FAILED_MESSAGE);
   }
 });

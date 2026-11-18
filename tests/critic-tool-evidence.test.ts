@@ -186,13 +186,16 @@ test("a completion with no tool evidence at all stays blocked (planning is not e
     { name: "set_plan", arguments: { steps: ["Answer the question."] } },
     {
       name: "finish_task",
-      arguments: { summary: "The capital of France is Paris." },
+      arguments: { summary: "It is sunny and 72 degrees in Astoria today." },
     },
   ];
+  // Round 4 (2026-11-18): the prompt is a current-fact claim, which
+  // the gate still blocks ungrounded — general knowledge (this
+  // test's pre-round-4 "capital of France" prompt) now ships.
   const run = await startTask(
     t,
     (index) => calls[index] ?? { text: "Done." },
-    "What is the capital of France?",
+    "What is today's weather in Astoria?",
   );
   try {
     await run.server.agent.worker.tick();
