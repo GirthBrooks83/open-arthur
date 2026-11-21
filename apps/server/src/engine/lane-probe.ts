@@ -17,15 +17,29 @@ import type { Config } from "../config.ts";
 //                                   HTTP response is NOT enough, a
 //                                   squatter on the port is not the
 //                                   service.
-//   omniroute / n8n        -> GET <url>/ (the base URL itself);
-//                                   ANY HTTP response — even a 404 or
-//                                   an auth challenge — proves the
-//                                   service is reachable; only a
-//                                   network error / timeout is false.
+//   omniroute              -> GET <url>/v1/models (the route the
+//                                   adapter itself calls); ANY HTTP
+//                                   response — even a 404 or an auth
+//                                   challenge — proves the service
+//                                   is reachable; only a network
+//                                   error / timeout is false.
+//   n8n                    -> GET <url>/healthz (n8n's own health
+//                                   route); ANY HTTP response proves
+//                                   reachability, as for omniroute.
 //   browser worker               -> GET <workerUrl>/health, 2xx only
 //                                   (the worker serves {status:"ok"}
 //                                   there unauthenticated; see
 //                                   apps/worker/src/server.ts).
+//
+// Probe targets are not always the service URLs. A lane's service
+// URL is where adapters send real work; on a single-host deploy it
+// can be a public tunnel address that rotates hourly and adds
+// seconds of latency, so probing it measures the tunnel, not the
+// lane — a healthy lane reads false whenever the tunnel is slow,
+// and forever once its hostname has rotted. Operators can set a
+// per-lane probe override (LANE_PROBE_URL_<LANE>, see config.ts)
+// pointing at the lane's localhost address; laneProbeFor prefers
+// the override and falls back to the service URL when none is set.
 //
 // Slack is deliberately NOT probed: its proof is event-driven (Slack
 // signs and POSTs events to us), so there is no lane endpoint whose
@@ -75,6 +89,22 @@ type LaneKey = keyof LaneProbeTargets;
 const HEALTH_PATH_LANES: readonly LaneKey[] = ["mem0", "graphiti", "hindsight", "browser"];
 const BASE_URL_LANES: readonly LaneKey[] = ["omniroute", "n8n"];
 const API_PING_LANES: readonly LaneKey[] = ["anythingllm"];
+
+// The path each lane is probed on, appended to its probe target.
+// Health-path lanes serve /health; AnythingLLM's /api/ping is probed
+// by probeApiPing below; the base-URL lanes are probed on the real
+// route that proves the service itself is answering (OmniRoute's
+// model list, n8n's health route) rather than the bare root, which
+// a tunnel or squatter could answer just as well.
+const PROBE_PATHS: Record<LaneKey, string> = {
+  mem0: "/health",
+  graphiti: "/health",
+  hindsight: "/health",
+  browser: "/health",
+  anythingllm: "/api/ping",
+  omniroute: "/v1/models",
+  n8n: "/healthz",
+};
 
 function cleanBase(url: string | undefined): string | undefined {
   const trimmed = url?.trim();
@@ -186,7 +216,7 @@ export class LaneProbe {
   private async probeOne(key: LaneKey, baseUrl: string): Promise<boolean> {
     if (API_PING_LANES.includes(key)) return this.probeApiPing(baseUrl);
     const isHealthLane = HEALTH_PATH_LANES.includes(key);
-    const url = isHealthLane ? `${baseUrl}/health` : baseUrl;
+    const url = `${baseUrl}${PROBE_PATHS[key]}`;
     try {
       const response = await this.fetchFn(url, {
         method: "GET",
@@ -225,20 +255,34 @@ export class LaneProbe {
   }
 }
 
+// A lane's probe target: its probe override when one is set (the
+// first non-blank URL wins), else its service URL. A lane with no
+// service URL is never probed — an override alone does not enable
+// a lane, so unconfigured lanes keep reporting null.
+function probeTarget(
+  override: string | undefined,
+  serviceUrl: string | undefined,
+): string | undefined {
+  if (!serviceUrl?.trim()) return undefined;
+  return [override, serviceUrl].find((url) => url?.trim());
+}
+
 export function laneProbeFor(
   config: Config,
   fetchFn: FetchFn = fetch,
   options: { timeoutMs?: number; ttlMs?: number; now?: () => number } = {},
 ): LaneProbe {
+  const integrations = config.integrations;
+  const probeUrls = integrations?.probeUrls;
   return new LaneProbe(
     {
-      mem0: config.integrations?.mem0Url,
-      graphiti: config.integrations?.graphitiUrl,
-      hindsight: config.integrations?.hindsightUrl,
-      omniroute: config.integrations?.omnirouteUrl,
-      anythingllm: config.integrations?.anythingLlmUrl,
-      n8n: config.integrations?.n8nUrl,
-      browser: config.workerUrl,
+      mem0: probeTarget(probeUrls?.mem0, integrations?.mem0Url),
+      graphiti: probeTarget(probeUrls?.graphiti, integrations?.graphitiUrl),
+      hindsight: probeTarget(probeUrls?.hindsight, integrations?.hindsightUrl),
+      omniroute: probeTarget(probeUrls?.omniroute, integrations?.omnirouteUrl),
+      anythingllm: probeTarget(probeUrls?.anythingllm, integrations?.anythingLlmUrl),
+      n8n: probeTarget(probeUrls?.n8n, integrations?.n8nUrl),
+      browser: probeTarget(config.workerProbeUrl, config.workerUrl),
     },
     fetchFn,
     options,

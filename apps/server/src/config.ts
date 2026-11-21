@@ -89,6 +89,10 @@ export interface Config {
   googleClientSecret?: string;
   googleRedirectUri: string;
   workerUrl?: string;
+  // Optional probe-only override for the browser worker lane (see
+  // IntegrationEndpoints.probeUrls): probing uses this INSTEAD of
+  // workerUrl when set; real work always uses workerUrl.
+  workerProbeUrl?: string;
   workerToken?: string;
   // Agent browser (Stagehand) enablement on the API side. The browser
   // worker does the actual Stagehand work (POST /extract, behind
@@ -103,6 +107,26 @@ export interface Config {
   computerDeploymentId?: string;
   integrations?: IntegrationEndpoints;
   allowedOrigins: string[];
+}
+
+// Optional per-lane PROBE targets for the live health probes
+// (engine/lane-probe.ts), keyed by lane. The service URLs on
+// IntegrationEndpoints are where adapters send real work; on a
+// single-host deploy those URLs can be public tunnel addresses that
+// rotate hourly and add seconds of latency, so probing them measures
+// the tunnel, not the lane — healthy lanes read false whenever the
+// tunnel is slow or its hostname has rotted. A probe URL set here
+// replaces the service URL FOR PROBING ONLY (point it at the lane's
+// localhost address); an unset lane probes its service URL, as
+// before. Probing a lane never enables it: a lane with no service
+// URL stays off no matter what is set here.
+export interface LaneProbeUrls {
+  mem0?: string;
+  graphiti?: string;
+  hindsight?: string;
+  omniroute?: string;
+  anythingllm?: string;
+  n8n?: string;
 }
 
 // Approved external lanes (see docs/integrations.md). Each is an optional
@@ -121,6 +145,9 @@ export interface IntegrationEndpoints {
   hindsightUrl?: string;
   n8nUrl?: string;
   anythingLlmUrl?: string;
+  // Probe-only targets (see LaneProbeUrls). Set from the
+  // LANE_PROBE_URL_<LANE> environment variables.
+  probeUrls?: LaneProbeUrls;
   // Developer-API key for the AnythingLLM adapter (engine/anythingllm.ts).
   // The URL alone enables the lane (ping needs no auth); the key is
   // what unlocks the workspace/chat calls.
@@ -227,6 +254,7 @@ export function readConfig(): Config {
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
     googleRedirectUri: `${publicUrl}/api/google/callback`,
     workerUrl: process.env.BROWSER_WORKER_URL,
+    workerProbeUrl: process.env.LANE_PROBE_URL_BROWSER,
     workerToken: process.env.WORKER_TOKEN,
     agentBrowserEnabled: process.env.AGENT_BROWSER_ENABLED === "true",
     taskWorkerEnabled: process.env.TASK_WORKER_ENABLED !== "false",
@@ -242,6 +270,14 @@ export function readConfig(): Config {
       anythingLlmUrl: process.env.ANYTHINGLLM_URL,
       anythingLlmApiKey: process.env.ANYTHINGLLM_API_KEY,
       anythingLlmWorkspace: process.env.ANYTHINGLLM_WORKSPACE,
+      probeUrls: {
+        mem0: process.env.LANE_PROBE_URL_MEM0,
+        graphiti: process.env.LANE_PROBE_URL_GRAPHITI,
+        hindsight: process.env.LANE_PROBE_URL_HINDSIGHT,
+        omniroute: process.env.LANE_PROBE_URL_OMNIROUTE,
+        anythingllm: process.env.LANE_PROBE_URL_ANYTHINGLLM,
+        n8n: process.env.LANE_PROBE_URL_N8N,
+      },
     },
     allowedOrigins: (
       process.env.ALLOWED_ORIGINS ?? "http://localhost:8081,http://127.0.0.1:8081"
