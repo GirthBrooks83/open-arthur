@@ -15,6 +15,7 @@ import { computerInstructions, computerTools } from "../computer-tools.ts";
 import type { Config } from "../config.ts";
 import { humanProviderError, sanitizeMessagesForProvider } from "./provider-boundary.ts";
 import { buildProviderChain } from "./rate-limit.ts";
+import { routeState } from "./route-state.ts";
 import type { AgentService } from "./service.ts";
 
 export class ConversationAgent extends AbstractAgent {
@@ -392,16 +393,24 @@ export class ConversationAgent extends AbstractAgent {
         },
       }),
     ];
-    const agent = new BuiltInAgent({
-      // Chat starts on the same routed provider as tasks: the head of the
-      // configured chain whose provider key is present.
-      model:
+    // Chat starts on the same routed provider as tasks: the head of
+    // the configured chain whose provider key is present — passed
+    // through the circuit breaker (engine/route-state.ts), so a head
+    // in a known rate-limit cooldown yields to the next non-cooling
+    // route. Chat has no failover of its own once a run starts, so
+    // the breaker is its only way past a cooling head; when nothing
+    // is cooling this is exactly the chain head, as before.
+    const chatModel =
+      routeState.orderChain(
         buildProviderChain(
           [this.config.model, this.config.fallbackModel, this.config.fallbackModel2],
           modelProviderKeyPresent,
-        )[0] ??
-        this.config.model ??
-        "openai/unconfigured",
+        ),
+      )[0] ??
+      this.config.model ??
+      "openai/unconfigured";
+    const agent = new BuiltInAgent({
+      model: chatModel,
       // Same per-call output-token cap as the task engine
       // (MODEL_MAX_OUTPUT_TOKENS) — chat calls budget against the
       // provider's per-minute output allowance too.
@@ -421,6 +430,12 @@ export class ConversationAgent extends AbstractAgent {
         computerInstructions,
     });
     return new Observable((subscriber) => {
+      // Circuit-breaker bookkeeping (engine/route-state.ts): the
+      // run's terminal outcome teaches the shared route state, so
+      // health's modelRouting reflects what chat actually met. The
+      // flag keeps a stream that completes AFTER a RUN_ERROR from
+      // overwriting the failure it already recorded.
+      let runFailed = false;
       const subscription = agent
         .run({
           ...input,
@@ -436,18 +451,28 @@ export class ConversationAgent extends AbstractAgent {
             // A provider rejection arrives as a RUN_ERROR event (or
             // as a stream error, below) carrying the provider's own
             // wording. Neither may reach the client raw.
-            if (event.type === EventType.RUN_ERROR && "message" in event)
+            if (event.type === EventType.RUN_ERROR && "message" in event) {
+              runFailed = true;
+              routeState.recordFailure(chatModel, String(event.message));
               subscriber.next({ ...event, message: humanProviderError(event.message) });
-            else subscriber.next(event);
+            } else subscriber.next(event);
           },
           error: (error) => {
+            runFailed = true;
+            routeState.recordFailure(
+              chatModel,
+              error instanceof Error ? error.message : String(error),
+            );
             subscriber.next({
               type: EventType.RUN_ERROR,
               message: humanProviderError(error),
             });
             subscriber.complete();
           },
-          complete: () => subscriber.complete(),
+          complete: () => {
+            if (!runFailed) routeState.recordSuccess(chatModel);
+            subscriber.complete();
+          },
         });
       return () => {
         browserAbort.abort();

@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { createApp } from "./app.ts";
 import { readConfig } from "./config.ts";
 import { createStore } from "./db.ts";
+import { atlasLaneProbe, resolveAtlasLane } from "./engine/atlas-lane.ts";
 
 const config = readConfig();
 const db = await createStore({
@@ -30,6 +31,23 @@ const server = serve({ fetch: app.fetch, port: config.port, hostname: config.hos
     .catch((error: unknown) =>
       console.log(
         `[OpenMuse] GitHub eyes startup revalidation failed to run: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
+  // ATLAS lane: "ready" is earned per process, exactly like the
+  // eyes' verified level — one real read-only probe through the
+  // lane's own Groq route now that the server is up
+  // (engine/atlas-lane.ts). Fire-and-forget: boot never waits on
+  // Groq, and the outcome lands in /api/health.
+  void atlasLaneProbe
+    .probe(resolveAtlasLane(config), process.env.GROQ_API_KEY)
+    .then((status) =>
+      console.log(
+        `[OpenMuse] ATLAS lane startup probe: status=${status.status} probe=${status.probe.state}${status.probe.error ? ` error=${status.probe.error}` : ""}`,
+      ),
+    )
+    .catch((error: unknown) =>
+      console.log(
+        `[OpenMuse] ATLAS lane startup probe failed to run: ${error instanceof Error ? error.message : String(error)}`,
       ),
     );
 });
