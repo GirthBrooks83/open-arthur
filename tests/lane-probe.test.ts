@@ -8,7 +8,7 @@ import { after, before, test } from "node:test";
 import { createApp } from "../apps/server/src/app.ts";
 import type { Config } from "../apps/server/src/config.ts";
 import { createStore, type Store } from "../apps/server/src/db.ts";
-import { LaneProbe } from "../apps/server/src/engine/lane-probe.ts";
+import { LaneProbe, laneProbeFor } from "../apps/server/src/engine/lane-probe.ts";
 
 // Live lane probes (ATLAS audit Priority 3): /api/health's
 // `integrations.*` booleans are Boolean(url) — configuration, not
@@ -383,4 +383,64 @@ test("an app with nothing configured reports every live value null and probes no
     n8n: null,
   });
   assert.equal(health.browserLive, null);
+});
+
+test("omniroute and n8n are probed on their real routes, not the bare root", async () => {
+  const seen: string[] = [];
+  const recorder = createServer((request, response) => {
+    seen.push(request.url ?? "");
+    response.writeHead(404);
+    response.end("nope");
+  });
+  recorder.listen(0, "127.0.0.1");
+  await once(recorder, "listening");
+  const address = recorder.address();
+  assert(address && typeof address !== "string");
+  try {
+    const probe = new LaneProbe(
+      {
+        omniroute: `http://127.0.0.1:${address.port}`,
+        n8n: `http://127.0.0.1:${address.port}`,
+      },
+      fetch,
+      { timeoutMs: 1000 },
+    );
+    const snapshot = await probe.refresh();
+    assert.equal(
+      snapshot.integrationsLive.omniroute,
+      true,
+      "any response on /v1/models is reachable",
+    );
+    assert.equal(snapshot.integrationsLive.n8n, true, "any response on /healthz is reachable");
+    assert.deepEqual([...seen].sort(), ["/healthz", "/v1/models"]);
+  } finally {
+    recorder.closeAllConnections();
+    await new Promise<void>((resolve) => recorder.close(() => resolve()));
+  }
+});
+
+test("laneProbeFor probes the probe override, falling back to the service URL", async () => {
+  const probe = laneProbeFor(
+    baseConfig("/tmp/openmuse-lane-probe-targets", {
+      integrations: {
+        // The service URL answers 503 on /health: probing it would
+        // report false. The override points at the healthy stub, so
+        // a true here proves the override was probed instead.
+        mem0Url: failingUrl,
+        // No override: the service URL is probed, as before.
+        graphitiUrl: healthyUrl,
+        probeUrls: {
+          mem0: healthyUrl,
+          // An override with no service URL does not enable a lane.
+          hindsight: healthyUrl,
+        },
+      },
+    }),
+    fetch,
+    { timeoutMs: 1000 },
+  );
+  const snapshot = await probe.refresh();
+  assert.equal(snapshot.integrationsLive.mem0, true, "probe override wins over the service URL");
+  assert.equal(snapshot.integrationsLive.graphiti, true, "no override: service URL is probed");
+  assert.equal(snapshot.integrationsLive.hindsight, null, "override alone never enables a lane");
 });
