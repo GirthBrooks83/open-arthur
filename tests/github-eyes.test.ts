@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -14,6 +14,7 @@ import {
   GITHUB_READ_ONLY_SERVER_TOOLS,
   GitHubEyes,
   GitHubEyesError,
+  type GitHubEyesPersistedRecord,
   type GitHubEyesToolName,
   HttpMcpTransport,
   type McpCallResult,
@@ -199,8 +200,13 @@ test("tools: agent tools translate to the right server calls", async () => {
   const transport = new FakeTransport();
   const eyes = new GitHubEyes({ token: "test-token", transport });
 
+  const overviewCallIndex = transport.calls.length;
   await eyes.readTool("github_repo_overview", { owner: "GirthBrooks83", repo: "open-arthur" });
-  assert.deepEqual(transport.calls.at(-1), {
+  // The overview's primary call is the repository search. This
+  // fake's payload matches nothing, so the composed-overview
+  // fallback may follow the search with repo-scoped calls; the
+  // translation asserted here is the search call itself.
+  assert.deepEqual(transport.calls[overviewCallIndex], {
     name: "search_repositories",
     args: { query: "repo:GirthBrooks83/open-arthur", minimal_output: false },
   });
@@ -513,6 +519,109 @@ test("overview: a search error result passes through as an error, never as data"
     repo: "open-arthur",
   });
   assert.deepEqual(read, { error: "search blew up" });
+  assert.equal(eyes.status().verified, false);
+});
+
+// --- Overview fallback: search cannot resolve the pinned repo ----------
+// With a fine-grained PAT, GitHub search returns zero results for
+// the token's own repository while repo-scoped reads of it succeed
+// (proven live 2026-11-21). The overview then composes from
+// list_branches + list_commits — addressed reads that can only
+// answer for the pinned repository.
+
+class ScriptedTransport implements McpTransport {
+  readonly calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  constructor(private readonly byTool: Record<string, McpCallResult>) {}
+  async initialize(): Promise<void> {}
+  async listTools(): Promise<McpToolInfo[]> {
+    return [...READ_TOOLS, ...WRITE_TOOLS];
+  }
+  async callTool(name: string, args: Record<string, unknown>): Promise<McpCallResult> {
+    this.calls.push({ name, args });
+    const result = this.byTool[name];
+    if (!result) throw new Error(`unscripted tool ${name}`);
+    return result;
+  }
+}
+
+const textResult = (value: unknown): McpCallResult => ({
+  content: [{ type: "text", text: JSON.stringify(value) }],
+});
+
+test("overview fallback: composes the overview from repo-scoped reads when search finds nothing", async () => {
+  const transport = new ScriptedTransport({
+    search_repositories: textResult({ total_count: 0, incomplete_results: false }),
+    list_branches: textResult([
+      { name: "main", sha: "abc123", protected: true },
+      { name: "arthur/feature", sha: "def456", protected: false },
+    ]),
+    list_commits: textResult([
+      {
+        sha: "abc123",
+        commit: {
+          message: "Latest work",
+          author: { name: "Girth", date: "2026-11-21T00:00:00Z" },
+        },
+      },
+    ]),
+  });
+  const eyes = new GitHubEyes({ token: "test-token", transport });
+  const read = await eyes.readTool("github_repo_overview", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
+  const data = (
+    read as {
+      data: {
+        full_name: string;
+        default_branch: string | null;
+        branch_count: number;
+        latest_commit: { sha: string; message: string };
+      };
+    }
+  ).data;
+  assert.equal(data.full_name, "GirthBrooks83/open-arthur");
+  assert.equal(data.default_branch, "main");
+  assert.equal(data.branch_count, 2);
+  assert.equal(data.latest_commit.sha, "abc123");
+  assert.equal(data.latest_commit.message, "Latest work");
+  assert.equal(eyes.status().verified, true);
+});
+
+test("overview fallback: an ambiguous tip leaves the default branch null, never guessed", async () => {
+  const transport = new ScriptedTransport({
+    search_repositories: textResult({ total_count: 0, incomplete_results: false }),
+    list_branches: textResult([
+      { name: "main", sha: "abc123", protected: true },
+      { name: "release", sha: "abc123", protected: false },
+    ]),
+    list_commits: textResult([
+      { sha: "abc123", commit: { message: "Latest work", author: { name: "G", date: "d" } } },
+    ]),
+  });
+  const eyes = new GitHubEyes({ token: "test-token", transport });
+  const read = await eyes.readTool("github_repo_overview", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
+  assert.equal((read as { data: { default_branch: unknown } }).data.default_branch, null);
+  assert.equal(eyes.status().verified, true);
+});
+
+test("overview fallback: unusable repo-scoped payloads keep the original refusal and never verify", async () => {
+  const transport = new ScriptedTransport({
+    search_repositories: textResult({ total_count: 0, incomplete_results: false }),
+    list_branches: textResult({ total_count: 1, items: [{ full_name: "SomeoneElse/other" }] }),
+    list_commits: textResult([]),
+  });
+  const eyes = new GitHubEyes({ token: "test-token", transport });
+  const read = await eyes.readTool("github_repo_overview", {
+    owner: "GirthBrooks83",
+    repo: "open-arthur",
+  });
+  assert.match((read as { error: string }).error, /not among the lookup results/);
+  // No foreign repository data leaks into the answer.
+  assert.equal(JSON.stringify(read).includes("SomeoneElse"), false);
   assert.equal(eyes.status().verified, false);
 });
 
@@ -914,4 +1023,161 @@ test("pin: missing owner or repo is refused, pre-transport", async () => {
     assert.match(read.error, /github_list_branches requires owner and repo/);
   }
   assert.equal(transport.calls.length, 0);
+});
+
+// Persistence + startup revalidation (2026-11-22): the stamps
+// are written to an on-disk record when earned; a new process
+// starts BELOW verified with the record as history, and the
+// startup revalidation earns the live levels fresh — or records
+// the failure without erasing the history.
+
+async function tempStatusFile(): Promise<{ dir: string; statusFile: string }> {
+  const dir = await mkdtemp(join(tmpdir(), "github-eyes-status-"));
+  return { dir, statusFile: join(dir, "github-eyes-status.json") };
+}
+
+async function readRecord(statusFile: string): Promise<GitHubEyesPersistedRecord> {
+  return JSON.parse(await readFile(statusFile, "utf8")) as GitHubEyesPersistedRecord;
+}
+
+test("persistence: earning wired + verified writes the on-disk record at the earning moment", async () => {
+  const { dir, statusFile } = await tempStatusFile();
+  try {
+    const eyes = new GitHubEyes({
+      token: "test-token",
+      transport: new FakeTransport(),
+      statusFile,
+    });
+    await eyes.readTool("github_list_branches", {
+      owner: GITHUB_EYES_PINNED_OWNER,
+      repo: GITHUB_EYES_PINNED_REPO,
+    });
+    const status = eyes.status();
+    assert.equal(status.verified, true);
+    const record = await readRecord(statusFile);
+    assert.equal(record.version, 1);
+    assert.equal(record.wired?.via, "mcp-handshake");
+    assert.ok(record.wired?.earnedAt);
+    assert.equal(record.verified?.via, "list_branches");
+    // The persisted verified stamp is the same moment the live
+    // status reports — one earning, two views of it.
+    assert.equal(record.verified?.earnedAt, status.lastVerifiedAt);
+    assert.deepEqual(status.persisted?.verified, record.verified);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("persistence: a fresh process starts below verified — the record is history, not a live claim", async () => {
+  const { dir, statusFile } = await tempStatusFile();
+  try {
+    const first = new GitHubEyes({
+      token: "test-token",
+      transport: new FakeTransport(),
+      statusFile,
+    });
+    await first.readTool("github_list_branches", {
+      owner: GITHUB_EYES_PINNED_OWNER,
+      repo: GITHUB_EYES_PINNED_REPO,
+    });
+    const earned = await readRecord(statusFile);
+
+    // A "restarted" client over the same record: nothing earned
+    // in THIS process yet, whatever the record says.
+    const restarted = new GitHubEyes({
+      token: "test-token",
+      transport: new FakeTransport(),
+      statusFile,
+    });
+    const status = restarted.status();
+    assert.equal(status.configured, true);
+    assert.equal(status.wired, false);
+    assert.equal(status.verified, false);
+    assert.equal(status.level, "configured");
+    assert.equal(status.revalidation, "pending");
+    assert.equal(status.persisted?.verified?.earnedAt, earned.verified?.earnedAt);
+    assert.equal(status.persisted?.wired?.earnedAt, earned.wired?.earnedAt);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("revalidation: startup revalidation earns verified through the real read path", async () => {
+  const { dir, statusFile } = await tempStatusFile();
+  try {
+    const transport = new FakeTransport();
+    const eyes = new GitHubEyes({ token: "test-token", transport, statusFile });
+    const status = await eyes.revalidateStartup();
+    assert.equal(status.wired, true);
+    assert.equal(status.verified, true);
+    assert.equal(status.level, "verified");
+    assert.equal(status.revalidation, "passed");
+    // The proof was a real allowlisted call against the pinned
+    // repository — the same path an agent tool call takes.
+    assert.deepEqual(
+      transport.calls.map((call) => call.name),
+      ["list_branches"],
+    );
+    assert.equal(transport.calls[0]?.args.owner, GITHUB_EYES_PINNED_OWNER);
+    assert.equal(transport.calls[0]?.args.repo, GITHUB_EYES_PINNED_REPO);
+    const record = await readRecord(statusFile);
+    assert.equal(record.revalidation?.state, "passed");
+    assert.equal(record.verified?.via, "list_branches");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("revalidation: a failed startup check records the failure and keeps the historical stamps", async () => {
+  const { dir, statusFile } = await tempStatusFile();
+  try {
+    const first = new GitHubEyes({
+      token: "test-token",
+      transport: new FakeTransport(),
+      statusFile,
+    });
+    await first.readTool("github_list_branches", {
+      owner: GITHUB_EYES_PINNED_OWNER,
+      repo: GITHUB_EYES_PINNED_REPO,
+    });
+    const earned = await readRecord(statusFile);
+
+    const failing = new FakeTransport();
+    failing.failInitialize = true;
+    const restarted = new GitHubEyes({ token: "test-token", transport: failing, statusFile });
+    const status = await restarted.revalidateStartup();
+    assert.equal(status.verified, false);
+    assert.equal(status.level, "configured");
+    assert.equal(status.revalidation, "failed");
+    assert.ok(status.lastError);
+    // History is not erased by a failed re-check: the record
+    // still shows when verified WAS earned, next to the failure.
+    assert.equal(status.persisted?.verified?.earnedAt, earned.verified?.earnedAt);
+    assert.equal(status.persisted?.revalidation?.state, "failed");
+    assert.ok(status.persisted?.revalidation?.error);
+    assert.equal(status.persisted?.lastError?.message, status.lastError);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("persistence: a corrupt record file is ignored — never thrown, never claimed", async () => {
+  const { dir, statusFile } = await tempStatusFile();
+  try {
+    await writeFile(statusFile, "this is not json{");
+    const eyes = new GitHubEyes({
+      token: "test-token",
+      transport: new FakeTransport(),
+      statusFile,
+    });
+    assert.equal(eyes.status().persisted, null);
+    assert.equal(eyes.status().level, "configured");
+    // And the client still works: earning overwrites the garbage
+    // with a valid record.
+    const status = await eyes.revalidateStartup();
+    assert.equal(status.verified, true);
+    assert.equal((await readRecord(statusFile)).verified?.via, "list_branches");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
