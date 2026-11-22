@@ -22,6 +22,7 @@ import {
   type ProviderFailure,
   rateLimitDelayMs,
 } from "./rate-limit.ts";
+import { routeState } from "./route-state.ts";
 import type { AgentService } from "./service.ts";
 import { skillManageOpSchema } from "./skills.ts";
 import { LostLeaseError, type TaskContext } from "./worker.ts";
@@ -607,8 +608,17 @@ export async function executeModelTask(
   // Ordered provider chain: the run starts on the first entry whose
   // provider key is present. If no entry is keyed, keep the primary so
   // the provider's own error speaks, exactly as before routing existed.
-  const chain = buildProviderChain(routing.orderedModels, modelProviderKeyPresent);
-  if (!chain.length) chain.push(config.model);
+  const keyedChain = buildProviderChain(routing.orderedModels, modelProviderKeyPresent);
+  if (!keyedChain.length) keyedChain.push(config.model);
+  // Circuit breaker (engine/route-state.ts): a route in a known
+  // rate-limit cooldown sinks below every non-cooling route, so the
+  // run starts where a call can actually succeed instead of eating
+  // the head's 429 and only then discovering failover. Ordering
+  // within each group is the chain's own; when nothing is cooling
+  // this is exactly the keyed chain, and the wait/failover semantics
+  // below are unchanged — the breaker only short-circuits cooldowns
+  // earlier runs already proved.
+  const chain = routeState.orderChain(keyedChain);
   let chainIndex = 0;
   let activeModel = chain[0] ?? config.model;
   let agent = makeAgent(activeModel);
@@ -653,6 +663,12 @@ export async function executeModelTask(
       "step",
       "Model routing",
       `The configured primary model ${config.model} has no provider key set; this run starts on ${activeModel}.`,
+    );
+  if (keyedChain[0] && chain[0] !== keyedChain[0])
+    await ctx.event(
+      "step",
+      "Model routing",
+      `Provider ${keyedChain[0]} is in rate-limit cooldown until ${routeState.cooldownUntil(keyedChain[0]) ?? "its window passes"}; this run starts on ${activeModel}.`,
     );
   // Free-tier providers cap requests per minute, and a multi-step run can
   // hit that wall mid-flight. When the provider names a short retry window,
@@ -746,6 +762,17 @@ export async function executeModelTask(
       thrown = error;
     }
     const failure = runError ?? (thrown instanceof Error ? thrown.message : undefined);
+    // Circuit-breaker bookkeeping (engine/route-state.ts): a settled
+    // attempt teaches the shared route state — a clean finish marks
+    // the route active; a provider failure records the error and,
+    // for rate limits, trips the route's cooldown so the NEXT run
+    // starts past it. Engine-internal failures (a lost lease, an
+    // authored error) are not the provider's verdict and teach
+    // nothing; a settled task outcome masks a later stream error
+    // here exactly as it does for the run itself below.
+    if (!failure) routeState.recordSuccess(activeModel);
+    else if (!outcome && !(thrown instanceof LostLeaseError) && !isEngineAuthoredError(thrown))
+      routeState.recordFailure(activeModel, failure);
     if (!failure || outcome) break;
     const delay = rateLimitDelayMs(failure);
     if (delay === null) {

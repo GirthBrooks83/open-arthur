@@ -16,8 +16,10 @@ import { ComputerService, type DockerRunner } from "./computer.ts";
 import { computerRoutes } from "./computer-routes.ts";
 import type { Config } from "./config.ts";
 import type { Store } from "./db.ts";
+import { atlasLaneProbe, resolveAtlasLane } from "./engine/atlas-lane.ts";
 import { type LaneProbe, laneProbeFor } from "./engine/lane-probe.ts";
 import { buildProviderChain } from "./engine/rate-limit.ts";
+import { routeState } from "./engine/route-state.ts";
 import { agentRoutes } from "./engine/routes.ts";
 import { AgentService } from "./engine/service.ts";
 import { AppError } from "./errors.ts";
@@ -164,32 +166,24 @@ export async function createApp(
       mode: config.mode,
       agentConfigured: agentConfigured(config),
       modelRouting: (() => {
+        // `active` is what a new run would actually start on: the
+        // chain head after the circuit breaker (engine/route-state.ts)
+        // sinks any route in a known rate-limit cooldown. A cooling
+        // head keeps its place in `chain` (the configured order) but
+        // never reads as active while a non-cooling route exists;
+        // `routes` carries the earned per-route truth — state,
+        // last success/failure, and retryAfter for cooling routes.
         const chain = buildProviderChain(
           [config.model, config.fallbackModel, config.fallbackModel2],
           modelProviderKeyPresent,
         );
-        return { active: chain[0] ?? config.model ?? null, chain };
-      })(),
-      atlasLane: (() => {
-        const atlas = config.atlasLane ?? {
-          enabled: true,
-          configured: Boolean(process.env.GROQ_API_KEY),
-          provider: "GPT-OSS 120B via Groq free tier (OpenAI-compatible) — not a paid OpenAI key",
-          model: "openai/gpt-oss-120b",
-          baseUrl: "https://api.groq.com/openai/v1",
-          billing:
-            "free_then_paid — auto cut-off if the free route stops being free; never charges",
-        };
         return {
-          enabled: atlas.enabled,
-          configured: atlas.configured,
-          status: !atlas.enabled ? "off" : atlas.configured ? "ready" : "awaiting-groq-key",
-          provider: atlas.provider,
-          model: atlas.model,
-          baseUrl: atlas.baseUrl,
-          billing: atlas.billing,
+          active: routeState.orderChain(chain)[0] ?? config.model ?? null,
+          chain,
+          routes: routeState.snapshot(chain),
         };
       })(),
+      atlasLane: atlasLaneProbe.status(resolveAtlasLane(config)),
       browserConfigured: Boolean(config.workerUrl && config.workerToken),
       slack: { configured: slackConfigured(config) },
       integrations: {
