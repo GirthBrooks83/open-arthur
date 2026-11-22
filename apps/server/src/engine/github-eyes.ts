@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { Config } from "../config.ts";
 
 // GitHub eyes — READ-ONLY GitHub inspection for the agent (owner's
@@ -55,6 +57,19 @@ import type { Config } from "../config.ts";
 //                real (non-error) result through this client.
 // `status()` is a synchronous peek at cached state; connecting is
 // lazy (first tool use), so server boot never waits on GitHub.
+//
+// Persistence + revalidation (owner's order, 2026-11-22: a reboot
+// must not erase the truth, and a stamp must never become a stale
+// lie): the wired/verified stamps are ALSO written to an on-disk
+// record (github-eyes-status.json in the data dir) at the moment
+// they are earned, with the earning time and what earned them.
+// The record proves a level WAS reached and when — never that it
+// holds now. Live flags always start unearned in a new process
+// (level "configured", revalidation "pending"), and the startup
+// revalidation (revalidateStartup(), fired by the server entry
+// once it is serving) earns them fresh with one real read-only
+// call through this same engine path. Only then does status()
+// report wired/verified again — from this process's own proof.
 
 // The hosted server's read-only URL mode (GitHub's remote-server
 // documentation): the same MCP endpoint with read-only enforced
@@ -347,6 +362,33 @@ export const GITHUB_RESULT_CHAR_CAP = 24_000;
 
 export type GitHubEyesLevel = "off" | "configured" | "wired" | "verified";
 
+// One earned level in the on-disk record: when it was earned and
+// what earned it (the MCP handshake, or the server tool whose
+// real read proved the verified level).
+export interface GitHubEyesPersistedStamp {
+  earnedAt: string;
+  via: string;
+}
+
+// The on-disk record (github-eyes-status.json). History, not a
+// live claim: it survives restarts so the truth about what WAS
+// proven is never lost, while status() only reports a level the
+// CURRENT process has earned (see the module comment).
+export interface GitHubEyesPersistedRecord {
+  version: 1;
+  wired?: GitHubEyesPersistedStamp;
+  verified?: GitHubEyesPersistedStamp;
+  // The most recent startup revalidation attempt and its outcome.
+  revalidation?: { at: string; state: "passed" | "failed"; error?: string };
+  lastError?: { at: string; message: string };
+  updatedAt: string;
+}
+
+// This process's startup revalidation: "off" when the eyes are
+// not configured, "pending" from construction until the startup
+// check settles, then "passed" / "failed".
+export type GitHubEyesRevalidation = "off" | "pending" | "passed" | "failed";
+
 export interface GitHubEyesStatus {
   configured: boolean;
   wired: boolean;
@@ -359,26 +401,59 @@ export interface GitHubEyesStatus {
   blockedTools: string[];
   lastError?: string;
   lastVerifiedAt?: string;
+  // The on-disk record, exactly as persisted (null when no
+  // status file is configured or nothing has been recorded).
+  persisted: GitHubEyesPersistedRecord | null;
+  revalidation: GitHubEyesRevalidation;
 }
 
 export class GitHubEyes {
   private readonly token?: string;
   private readonly transport?: McpTransport;
+  private readonly statusFile?: string;
   private connectPromise?: Promise<void>;
+  private revalidationPromise?: Promise<GitHubEyesStatus>;
   private registeredServerTools = new Set<string>();
   private blockedTools: string[] = [];
   private wiredFlag = false;
   private verifiedFlag = false;
   private lastError?: string;
   private lastVerifiedAt?: string;
+  private persistedRecord: GitHubEyesPersistedRecord | null = null;
+  private revalidationState: GitHubEyesRevalidation;
 
-  constructor(options: { token?: string; url?: string; transport?: McpTransport }) {
+  constructor(options: {
+    token?: string;
+    url?: string;
+    transport?: McpTransport;
+    statusFile?: string;
+  }) {
     this.token = options.token?.trim() ? options.token.trim() : undefined;
     this.transport =
       options.transport ??
       (this.token
         ? new HttpMcpTransport({ url: options.url ?? GITHUB_MCP_DEFAULT_URL, token: this.token })
         : undefined);
+    this.statusFile = options.statusFile;
+    // Load the historical record if one exists. It seeds ONLY the
+    // persisted view: the live flags above start unearned in every
+    // process, whatever the record says — history is evidence,
+    // not a current claim. A missing or corrupt file is ignored:
+    // persistence must never take the eyes down with it.
+    if (this.statusFile) {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(this.statusFile, "utf8"));
+        if (
+          parsed !== null &&
+          typeof parsed === "object" &&
+          (parsed as { version?: unknown }).version === 1
+        )
+          this.persistedRecord = parsed as GitHubEyesPersistedRecord;
+      } catch {
+        this.persistedRecord = null;
+      }
+    }
+    this.revalidationState = this.configured ? "pending" : "off";
   }
 
   get configured(): boolean {
@@ -404,7 +479,32 @@ export class GitHubEyes {
       blockedTools: [...this.blockedTools],
       ...(this.lastError ? { lastError: this.lastError } : {}),
       ...(this.lastVerifiedAt ? { lastVerifiedAt: this.lastVerifiedAt } : {}),
+      persisted: this.persistedRecord ? { ...this.persistedRecord } : null,
+      revalidation: this.revalidationState,
     };
+  }
+
+  // Write the on-disk record after a level is earned or an error
+  // is recorded. Atomic (tmp file + rename) and best-effort: a
+  // disk failure is swallowed — the record is evidence about the
+  // eyes, never a reason for a read to fail.
+  private persistRecord(mutate: (record: GitHubEyesPersistedRecord) => GitHubEyesPersistedRecord) {
+    if (!this.statusFile) return;
+    const base: GitHubEyesPersistedRecord = this.persistedRecord ?? {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+    };
+    const next = mutate({ ...base });
+    next.updatedAt = new Date().toISOString();
+    this.persistedRecord = next;
+    try {
+      mkdirSync(dirname(this.statusFile), { recursive: true });
+      const tmp = `${this.statusFile}.tmp`;
+      writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
+      renameSync(tmp, this.statusFile);
+    } catch {
+      // Best-effort by design (see above).
+    }
   }
 
   // Connect (initialize + tools/list) and compute the registration
@@ -424,17 +524,85 @@ export class GitHubEyes {
         );
         this.blockedTools = offeredNames.filter((name) => !GITHUB_READ_ONLY_SERVER_TOOLS.has(name));
         this.wiredFlag = this.registeredServerTools.size > 0;
-        if (!this.wiredFlag) this.lastError = "GitHub MCP offered no allowlisted read tools";
-        else this.lastError = undefined;
+        if (!this.wiredFlag) {
+          this.lastError = "GitHub MCP offered no allowlisted read tools";
+          const message = this.lastError;
+          this.persistRecord((record) => ({
+            ...record,
+            lastError: { at: new Date().toISOString(), message },
+          }));
+        } else {
+          this.lastError = undefined;
+          // The wired stamp is earned HERE and nowhere else; the
+          // on-disk record is written at the same moment, so the
+          // proof survives the process (see the module comment).
+          const earnedAt = new Date().toISOString();
+          this.persistRecord((record) => ({
+            ...record,
+            wired: { earnedAt, via: "mcp-handshake" },
+          }));
+        }
       } catch (error) {
         this.wiredFlag = false;
         this.lastError = error instanceof Error ? error.message : "GitHub MCP connect failed";
+        const message = this.lastError;
+        this.persistRecord((record) => ({
+          ...record,
+          lastError: { at: new Date().toISOString(), message },
+        }));
       } finally {
         this.connectPromise = undefined;
       }
     })();
     await this.connectPromise;
     return this.status();
+  }
+
+  // Startup revalidation (owner's order, 2026-11-22): earn the
+  // wired + verified levels FRESH in this process, with no human
+  // invocation, by making one real allowlisted read through the
+  // ordinary engine path — readTool on the pinned repository, so
+  // the pin, the allowlist, the handshake and the verified
+  // earning all run exactly as they do for an agent call. The
+  // lightest repo-scoped read (one branch) is enough: a real
+  // tools/call returning a non-error result is the verified
+  // level's definition. The outcome — pass or fail, with the
+  // error — is written to the persisted record either way; a
+  // failure leaves the level at "configured" (plus whatever the
+  // handshake itself earned) and NEVER touches the historical
+  // stamps: they stay on record as history, unearned live.
+  // Idempotent per process: concurrent callers share one attempt.
+  async revalidateStartup(): Promise<GitHubEyesStatus> {
+    if (!this.configured) {
+      this.revalidationState = "off";
+      return this.status();
+    }
+    this.revalidationPromise ??= (async () => {
+      const at = new Date().toISOString();
+      const result = await this.readTool("github_list_branches", {
+        owner: GITHUB_EYES_PINNED_OWNER,
+        repo: GITHUB_EYES_PINNED_REPO,
+        perPage: 1,
+      });
+      const error = errorValue(result);
+      if (error !== undefined) {
+        this.revalidationState = "failed";
+        this.lastError = error;
+        this.persistRecord((record) => ({
+          ...record,
+          revalidation: { at, state: "failed", error },
+          lastError: { at, message: error },
+        }));
+      } else {
+        this.revalidationState = "passed";
+        this.persistRecord((record) => ({
+          ...record,
+          revalidation: { at, state: "passed" },
+        }));
+      }
+      return this.status();
+    })();
+    return this.revalidationPromise;
   }
 
   // The guarded raw call. The allowlist check runs BEFORE the
@@ -471,7 +639,7 @@ export class GitHubEyes {
     if (!this.registeredServerTools.has(name))
       throw new GitHubEyesError(`GitHub tool "${name}" was not offered by the MCP server`);
     const result = await this.transport.callTool(name, args);
-    return this.shapeResult(validate ? validate(result) : result);
+    return this.shapeResult(validate ? validate(result) : result, name);
   }
 
   // Execute one agent-facing tool by name. Refuses any repository
@@ -506,12 +674,36 @@ export class GitHubEyes {
         // toolset offers no direct get-repository read), and a
         // search payload is not proof of identity: validate the
         // exact repository before anything is presented.
-        return frameGitHubResult(
-          name,
-          await this.callServerTool(call.serverTool, call.args, (result) =>
-            exactRepositoryResult(result, owner, repo),
-          ),
-        );
+        try {
+          return frameGitHubResult(
+            name,
+            await this.callServerTool(call.serverTool, call.args, (result) =>
+              exactRepositoryResult(result, owner, repo),
+            ),
+          );
+        } catch (error) {
+          // Search cannot resolve every repository the token can
+          // read: with a fine-grained PAT, GitHub search returns
+          // zero results for the token's own pinned repository
+          // (proven live 2026-11-21 — the repo:/user: qualifiers
+          // come back empty while repo-scoped reads of the same
+          // repository succeed). ONLY the no-match refusal falls
+          // back, to an overview composed from repo-scoped reads
+          // (composedOverview); unparseable payloads and search
+          // or transport errors stay errors. If the composition
+          // cannot be built, the original refusal stands — never
+          // a substitute overview.
+          if (
+            !(error instanceof GitHubEyesError) ||
+            !/not among the lookup results/.test(error.message)
+          )
+            throw error;
+          try {
+            return frameGitHubResult(name, await this.composedOverview(owner, repo));
+          } catch {
+            throw error;
+          }
+        }
       }
       return frameGitHubResult(name, await this.callServerTool(call.serverTool, call.args));
     } catch (error) {
@@ -519,16 +711,64 @@ export class GitHubEyes {
     }
   }
 
-  private shapeResult(result: McpCallResult): unknown {
+  // The overview fallback for repositories search cannot resolve
+  // (see readTool): compose the overview from repo-scoped reads.
+  // Those reads are ADDRESSED to the pinned owner/repo — the
+  // server can only answer for that repository, and an
+  // inaccessible one errors — so no other repository's data can
+  // be presented as this one's overview. The default branch is
+  // named only when proven: list_commits without a ref reads the
+  // default branch, and the one branch whose tip equals that
+  // newest commit is the default branch; an ambiguous tip leaves
+  // it null rather than guessed. Both payloads are validated
+  // pre-shaping (the callServerTool validate hook), so a
+  // malformed payload earns no verified mark and no overview.
+  private async composedOverview(owner: string, repo: string): Promise<unknown> {
+    const branches = await this.callServerTool(
+      "list_branches",
+      { owner, repo, perPage: 100 },
+      (result) => branchListResult(result),
+    );
+    const branchesError = errorValue(branches);
+    if (branchesError !== undefined) throw new GitHubEyesError(branchesError);
+    const commits = await this.callServerTool(
+      "list_commits",
+      { owner, repo, perPage: 1 },
+      (result) => latestCommitResult(result),
+    );
+    const commitsError = errorValue(commits);
+    if (commitsError !== undefined) throw new GitHubEyesError(commitsError);
+    const branchList = branches as Array<{ name: string; sha: string }>;
+    const latest = (commits as Array<{ sha: string; message: string }>)[0];
+    const atTip = branchList.filter((branch) => branch.sha === latest.sha);
+    return {
+      full_name: `${owner}/${repo}`,
+      default_branch: atTip.length === 1 ? atTip[0].name : null,
+      default_branch_tip: latest.sha,
+      branch_count: branchList.length,
+      branches: branchList.map((branch) => branch.name),
+      latest_commit: latest,
+      note: "Overview composed from repo-scoped reads (list_branches, list_commits): repository search cannot resolve this repository for the configured token and the hosted toolset offers no direct get-repository read, so description and star/fork counts are unavailable here.",
+    };
+  }
+
+  private shapeResult(result: McpCallResult, serverTool?: string): unknown {
     const texts = (result.content ?? [])
       .filter((part) => part.type === "text" && typeof part.text === "string")
       .map((part) => part.text as string);
     const text = texts.join("\n");
     if (result.isError) return { error: text || "GitHub tool call failed" };
     // A real, non-error read through this client is the verified
-    // level's evidence — recorded here, nowhere else.
+    // level's evidence — recorded here, nowhere else. The stamp
+    // is persisted at the same moment (see the module comment),
+    // naming the server tool whose read earned it.
     this.verifiedFlag = true;
     this.lastVerifiedAt = new Date().toISOString();
+    const earnedAt = this.lastVerifiedAt;
+    this.persistRecord((record) => ({
+      ...record,
+      verified: { earnedAt, via: serverTool ?? "read" },
+    }));
     if (!text) return { ok: true };
     let parsed: unknown;
     try {
@@ -620,6 +860,89 @@ function exactRepositoryResult(result: McpCallResult, owner: string, repo: strin
       `Repository ${owner}/${repo} was not among the lookup results; refusing to present a different repository's overview`,
     );
   return { content: [{ type: "text", text: JSON.stringify(match) }] };
+}
+
+// The { error } value a shaped result carries when the server
+// answered with an error result (see shapeResult).
+function errorValue(value: unknown): string | undefined {
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "error" in value &&
+    typeof (value as { error: unknown }).error === "string"
+  )
+    return (value as { error: string }).error;
+  return undefined;
+}
+
+// Payload validator for the composed overview's branch read:
+// the raw payload must be a JSON array of { name, sha } entries
+// and is reduced to exactly those fields. Anything else throws —
+// pre-shaping, so it earns no verified mark and no overview.
+function branchListResult(result: McpCallResult): McpCallResult {
+  if (result.isError) return result;
+  const text = (result.content ?? [])
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text as string)
+    .join("\n");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new GitHubEyesError(
+      "Branch lookup returned unparseable data; refusing to compose an unverified overview",
+    );
+  }
+  if (!Array.isArray(parsed))
+    throw new GitHubEyesError(
+      "Branch lookup returned unparseable data; refusing to compose an unverified overview",
+    );
+  const branches = parsed.map((entry) => {
+    const record = entry as { name?: unknown; sha?: unknown } | null;
+    if (!record || typeof record.name !== "string" || typeof record.sha !== "string")
+      throw new GitHubEyesError(
+        "Branch lookup returned unparseable data; refusing to compose an unverified overview",
+      );
+    return { name: record.name, sha: record.sha };
+  });
+  return { content: [{ type: "text", text: JSON.stringify(branches) }] };
+}
+
+// Payload validator for the composed overview's commit read:
+// the raw payload must be a non-empty JSON array whose first
+// entry carries a sha and a commit message; it is reduced to
+// that newest commit alone. Anything else throws, pre-shaping.
+function latestCommitResult(result: McpCallResult): McpCallResult {
+  if (result.isError) return result;
+  const text = (result.content ?? [])
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text as string)
+    .join("\n");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new GitHubEyesError(
+      "Commit lookup returned unparseable data; refusing to compose an unverified overview",
+    );
+  }
+  const entry = Array.isArray(parsed)
+    ? (parsed[0] as {
+        sha?: unknown;
+        commit?: { message?: unknown; author?: { name?: unknown; date?: unknown } };
+      } | null)
+    : null;
+  if (!entry || typeof entry.sha !== "string" || typeof entry.commit?.message !== "string")
+    throw new GitHubEyesError(
+      "Commit lookup returned unparseable data; refusing to compose an unverified overview",
+    );
+  const latest = {
+    sha: entry.sha,
+    message: entry.commit.message,
+    author: typeof entry.commit.author?.name === "string" ? entry.commit.author.name : null,
+    date: typeof entry.commit.author?.date === "string" ? entry.commit.author.date : null,
+  };
+  return { content: [{ type: "text", text: JSON.stringify([latest]) }] };
 }
 
 function capText(text: string): string {
@@ -715,5 +1038,12 @@ function pick(args: Record<string, unknown>, keys: string[]): Record<string, unk
 }
 
 export function githubEyesFor(config: Config): GitHubEyes {
-  return new GitHubEyes({ token: config.githubMcpToken, url: config.githubMcpUrl });
+  return new GitHubEyes({
+    token: config.githubMcpToken,
+    url: config.githubMcpUrl,
+    // The persisted status record lives in the data dir, next to
+    // the database — it survives restarts and VM-local redeploys
+    // of the code, like every other piece of owner data.
+    statusFile: join(config.dataDir, "github-eyes-status.json"),
+  });
 }
