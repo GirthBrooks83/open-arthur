@@ -3,10 +3,12 @@ import { test } from "node:test";
 import {
   allProvidersExhaustedMessage,
   buildProviderChain,
+  COOLDOWN_FLOOR_MS,
   DEFAULT_RATE_LIMIT_WAIT_MS,
   isProviderDoneForRun,
   isQuotaExhausted,
   MAX_RUN_RATE_LIMIT_WAITS,
+  providerClassificationText,
   rateLimitDelayMs,
 } from "../apps/server/src/engine/rate-limit.ts";
 
@@ -90,6 +92,58 @@ test("no failover on non-quota errors (e.g. an unknown provider prefix)", () => 
     'Unknown provider "groq" in "groq/llama-3.3-70b-versatile". Supported: openai, anthropic, google (gemini).';
   assert.equal(rateLimitDelayMs(message), null);
   assert.equal(isQuotaExhausted(rateLimitDelayMs(message), 0), false);
+});
+
+// The exact OmniRoute error that drained the 2026-11-26 task re-run:
+// HTTP 429, code model_cooldown. The APICallError's message is the bare
+// sentence; the true window (reset_seconds ≈ 23.6h) rides in the body.
+const OMNIROUTE_COOLDOWN_MESSAGE =
+  "All credentials for model gemini-3-flash-preview are cooling down";
+const OMNIROUTE_COOLDOWN_BODY =
+  '{"error":{"message":"All credentials for model gemini-3-flash-preview are cooling down","type":"rate_limit_error","code":"model_cooldown","model":"gemini-3-flash-preview","reset_seconds":84903,"retry_after":"2026-11-27T07:59:58.460Z","credentials_cooling":1}}';
+
+test("OmniRoute model_cooldown (bare message) classifies as a long-window rate limit", () => {
+  const delay = rateLimitDelayMs(OMNIROUTE_COOLDOWN_MESSAGE);
+  assert.equal(delay, COOLDOWN_FLOOR_MS);
+  // Long window: the provider is done for the run on the FIRST failure —
+  // failover engages immediately, no sleeping against the wall.
+  assert.equal(isProviderDoneForRun(delay, 0, 0), true);
+  // The RetryError wrapper the AI SDK surfaces classifies the same way.
+  assert.equal(
+    rateLimitDelayMs(`Failed after 3 attempts. Last error: ${OMNIROUTE_COOLDOWN_MESSAGE}`),
+    COOLDOWN_FLOOR_MS,
+  );
+});
+
+test("OmniRoute model_cooldown body: reset_seconds is the window", () => {
+  const delay = rateLimitDelayMs(OMNIROUTE_COOLDOWN_BODY);
+  assert.ok(delay !== null);
+  assert.ok(Math.abs(delay - 84_903_000) < 1000, `expected ~84903000ms, got ${delay}`);
+  assert.equal(isQuotaExhausted(delay, 0), true);
+});
+
+test("retry_after as an ISO timestamp parses to the remaining window", () => {
+  const at = new Date(Date.now() + 2 * 3_600_000).toISOString();
+  const delay = rateLimitDelayMs(
+    `{"error":{"code":"model_cooldown","message":"cooling down","retry_after":"${at}"}}`,
+  );
+  assert.ok(delay !== null);
+  assert.ok(Math.abs(delay - 2 * 3_600_000) < 5000, `expected ~2h, got ${delay}`);
+});
+
+test("classification text carries the response body the bare message lacks", () => {
+  const apiError = { message: OMNIROUTE_COOLDOWN_MESSAGE, responseBody: OMNIROUTE_COOLDOWN_BODY };
+  const text = providerClassificationText(apiError);
+  assert.match(text, /reset_seconds/);
+  const delay = rateLimitDelayMs(text);
+  assert.ok(delay !== null && Math.abs(delay - 84_903_000) < 1000, `got ${delay}`);
+  // The RetryError shape (message + lastError) reaches the body too.
+  const retryError = {
+    message: `Failed after 3 attempts. Last error: ${OMNIROUTE_COOLDOWN_MESSAGE}`,
+    lastError: apiError,
+  };
+  const retryDelay = rateLimitDelayMs(providerClassificationText(retryError));
+  assert.ok(retryDelay !== null && Math.abs(retryDelay - 84_903_000) < 1000, `got ${retryDelay}`);
 });
 
 test("provider chain: configured order wins, unkeyed and duplicate entries drop out", () => {

@@ -20,6 +20,7 @@ import {
   buildProviderChain,
   isProviderDoneForRun,
   type ProviderFailure,
+  providerClassificationText,
   rateLimitDelayMs,
 } from "./rate-limit.ts";
 import { routeState } from "./route-state.ts";
@@ -762,6 +763,17 @@ export async function executeModelTask(
       thrown = error;
     }
     const failure = runError ?? (thrown instanceof Error ? thrown.message : undefined);
+    // Classification text (rate-limit.ts): the classifier reads the
+    // provider's full error — message plus response body and nested
+    // causes — because the bare message may not carry the structured
+    // window the failover decision needs (OmniRoute's model_cooldown
+    // puts reset_seconds in the body only; classifying on the message
+    // alone returned "not a rate limit" and 65 queued tasks drained
+    // with no failover on 2026-11-26). Display text is unchanged:
+    // `failure` still owns the task record and the health readout.
+    const classificationText = [failure ?? "", thrown ? providerClassificationText(thrown) : ""]
+      .filter(Boolean)
+      .join("\n");
     // Circuit-breaker bookkeeping (engine/route-state.ts): a settled
     // attempt teaches the shared route state — a clean finish marks
     // the route active; a provider failure records the error and,
@@ -772,9 +784,9 @@ export async function executeModelTask(
     // here exactly as it does for the run itself below.
     if (!failure) routeState.recordSuccess(activeModel);
     else if (!outcome && !(thrown instanceof LostLeaseError) && !isEngineAuthoredError(thrown))
-      routeState.recordFailure(activeModel, failure);
+      routeState.recordFailure(activeModel, failure, Date.now(), classificationText);
     if (!failure || outcome) break;
-    const delay = rateLimitDelayMs(failure);
+    const delay = rateLimitDelayMs(classificationText);
     if (delay === null) {
       // Not a rate limit: a provider rejection (or an engine error).
       // The raw provider wording never reaches the task record — the

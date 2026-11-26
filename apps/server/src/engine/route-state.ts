@@ -84,13 +84,22 @@ export class RouteStateTracker {
    * rateLimitDelayMs) trips the cooldown until now + the provider's
    * own retry window; any other failure is recorded as the route's
    * last outcome (state "degraded") without tripping the breaker.
+   * `classificationText`, when the caller has the raw provider error,
+   * is what the classifier reads (see providerClassificationText in
+   * rate-limit.ts): the display message alone may not carry the
+   * provider's structured window. lastError keeps the display message.
    */
-  recordFailure(model: string, message: string, now = Date.now()): void {
+  recordFailure(
+    model: string,
+    message: string,
+    now = Date.now(),
+    classificationText?: string,
+  ): void {
     const record = this.record(model);
     record.lastFailureMs = now;
     record.lastOutcome = "failure";
     record.lastError = message.slice(0, 200);
-    const delay = rateLimitDelayMs(message);
+    const delay = rateLimitDelayMs(classificationText ?? message);
     if (delay !== null) {
       record.errorClass = "rate-limit";
       record.cooldownUntilMs = now + delay;
