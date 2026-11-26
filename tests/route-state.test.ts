@@ -99,6 +99,29 @@ test("ordering is stable: deliberate order survives within each group", () => {
   assert.deepEqual(tracker.orderChain([HEAD, NEXT, THIRD], T0), [HEAD, NEXT, THIRD]);
 });
 
+const OMNIROUTE_COOLDOWN_MESSAGE =
+  "All credentials for model gemini-3-flash-preview are cooling down";
+const OMNIROUTE_COOLDOWN_BODY =
+  '{"error":{"message":"All credentials for model gemini-3-flash-preview are cooling down","type":"rate_limit_error","code":"model_cooldown","model":"gemini-3-flash-preview","reset_seconds":84903,"retry_after":"2026-11-27T07:59:58.460Z","credentials_cooling":1}}';
+
+test("an OmniRoute cooldown trips the breaker: bare message sinks briefly, body sinks for its full window", () => {
+  const bare = new RouteStateTracker();
+  bare.recordFailure(HEAD, OMNIROUTE_COOLDOWN_MESSAGE, T0);
+  const bareStatus = bare.statusFor(HEAD, T0);
+  assert.equal(bareStatus.state, "cooldown");
+  assert.equal(bareStatus.errorClass, "rate-limit");
+  assert.deepEqual(bare.orderChain([HEAD, NEXT], T0), [NEXT, HEAD]);
+
+  const withBody = new RouteStateTracker();
+  withBody.recordFailure(HEAD, OMNIROUTE_COOLDOWN_MESSAGE, T0, OMNIROUTE_COOLDOWN_BODY);
+  const bodyStatus = withBody.statusFor(HEAD, T0);
+  assert.equal(bodyStatus.state, "cooldown");
+  const retryMs = Date.parse(bodyStatus.retryAfter ?? "") - T0;
+  assert.ok(Math.abs(retryMs - 84_903_000) < 1000, `expected ~84903000ms, got ${retryMs}`);
+  // Display text stays the bare message — the body is classification-only.
+  assert.equal(bodyStatus.lastError, OMNIROUTE_COOLDOWN_MESSAGE);
+});
+
 test("snapshot reports every chain route in chain order", () => {
   const tracker = new RouteStateTracker();
   tracker.recordSuccess(NEXT, T0);
